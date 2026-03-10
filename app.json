@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "robot-app",
+    "slug": "robot-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/salt.png",
+    "userInterfaceStyle": "light",
+
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+
+    "ios": {
+      "supportsTablet": true
+    },
+
+    "android": {
+      "package": "com.jakep623.robotapp",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyD31AhJNrjapXsUeT4nRKWBA_gRUrC16g0"
+        }
+      }
+    },
+
+    "plugins": [
+      "expo-dev-client",
+      "expo-maps"
+    ],
+
+    "extra": {
+      "eas": {
+        "projectId": "14e1cd26-55ee-4e6c-b06a-2497e95959eb"
+      }
+    }
+  }
+}
