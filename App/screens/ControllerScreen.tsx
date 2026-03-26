@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Pressable,
   ScrollView,
@@ -18,35 +18,9 @@ type AllowedAction = {
   reason: string | null;
 };
 
-type WorkflowAck = {
-  checked: boolean;
-  actor: string;
-  note: string | null;
-  at: number;
-};
-
-type WorkflowStep = {
-  id: string;
-  title: string;
-  kind: "manual" | "derived";
-  checked: boolean;
-  ready: boolean;
-  ack?: WorkflowAck | null;
-};
-
-type Workflow = {
-  id: string;
-  title: string;
-  active: boolean;
-  complete: boolean;
-  steps: WorkflowStep[];
-};
-
 type OperatorNote = {
   id: string;
   text: string;
-  category: string;
-  actor: string;
   at: number;
 };
 
@@ -92,7 +66,6 @@ type SupervisionSummary = {
   } | null;
   alerts: Alert[];
   allowedActions: AllowedAction[];
-  workflows: Workflow[];
   notes: OperatorNote[];
 };
 
@@ -129,7 +102,6 @@ type Props = {
   brinePct: number;
   setSaltPct: (value: number) => void;
   setBrinePct: (value: number) => void;
-  darkMode: boolean;
 };
 
 const MISSION_ENDPOINTS: Record<string, string> = {
@@ -147,7 +119,6 @@ export default function ControllerScreen({
   brinePct,
   setSaltPct,
   setBrinePct,
-  darkMode,
 }: Props) {
   const insets = useSafeAreaInsets();
   const [lastCommand, setLastCommand] = useState("NONE");
@@ -256,27 +227,6 @@ export default function ControllerScreen({
     }
   };
 
-  const toggleWorkflowStep = async (workflowId: string, step: WorkflowStep) => {
-    if (step.kind !== "manual") {
-      return;
-    }
-
-    setPendingAction(`${workflowId}:${step.id}`);
-    try {
-      await postJson(serverUrl, `/api/operator/workflows/${workflowId}/steps/${step.id}`, {
-        checked: !step.checked,
-        actor: "field-op",
-        note: step.checked ? null : "Acknowledged from mobile app",
-      });
-      setError(null);
-      await refresh();
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : `Workflow update failed: ${step.title}`);
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
   const submitNote = async () => {
     if (!noteText.trim()) {
       return;
@@ -302,35 +252,18 @@ export default function ControllerScreen({
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
   const missionState = summary?.mission?.state ?? status?.state ?? "UNKNOWN";
   const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
-  const workflows = useMemo(() => {
-    const all = summary?.workflows ?? [];
-    return [...all].sort((a, b) => Number(b.active) - Number(a.active) || Number(a.complete) - Number(b.complete));
-  }, [summary?.workflows]);
-  const theme = darkMode
-    ? {
-        pageBg: '#0f1722',
-        cardBg: '#182433',
-        cardBorder: '#27384e',
-        title: '#e8f0fb',
-        sectionTitle: '#d8e9ff',
-        text: '#c5d6e8',
-        muted: '#8fa4ba',
-        inputBg: '#101d2b',
-        inputBorder: '#2b3d55',
-        inputText: '#deebfa',
-      }
-    : {
-        pageBg: '#f3f5f8',
-        cardBg: '#ffffff',
-        cardBorder: '#dde5ef',
-        title: '#13233a',
-        sectionTitle: '#16324f',
-        text: '#304863',
-        muted: '#63788e',
-        inputBg: '#fbfcfe',
-        inputBorder: '#c8d0da',
-        inputText: '#13233a',
-      };
+  const theme = {
+    pageBg: '#f3f5f8',
+    cardBg: '#ffffff',
+    cardBorder: '#dde5ef',
+    title: '#13233a',
+    sectionTitle: '#16324f',
+    text: '#304863',
+    muted: '#63788e',
+    inputBg: '#fbfcfe',
+    inputBorder: '#c8d0da',
+    inputText: '#13233a',
+  };
 
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
@@ -457,61 +390,29 @@ export default function ControllerScreen({
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operator Workflows</Text>
-        {workflows.map((workflow) => (
-          <View key={workflow.id} style={styles.workflowBlock}>
-            <View style={styles.workflowHeaderRow}>
-              <Text style={[styles.workflowTitle, { color: theme.sectionTitle }]}>{workflow.title}</Text>
-              <Text style={[
-                styles.workflowBadge,
-                workflow.complete ? styles.workflowBadgeDone : workflow.active ? styles.workflowBadgeActive : styles.workflowBadgeIdle,
-              ]}>
-                {workflow.complete ? 'COMPLETE' : workflow.active ? 'ACTIVE' : 'STANDBY'}
-              </Text>
-            </View>
-            {workflow.steps.map((step) => (
-              <Pressable
-                key={step.id}
-                onPress={() => toggleWorkflowStep(workflow.id, step)}
-                disabled={step.kind !== "manual" || (!step.ready && !step.checked)}
-                style={[styles.workflowStep, step.checked ? styles.workflowDone : null]}
-              >
-                <Text style={[styles.workflowText, { color: theme.text }]}>{step.checked ? "✅" : "⬜"} {step.title}</Text>
-                <Text style={[styles.metaText, { color: theme.muted }]}>
-                  {step.kind === "manual"
-                    ? (step.ready || step.checked ? "Operator check: tap to toggle" : "Blocked: waiting on prerequisites")
-                    : "Auto-check from server state"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        ))}
-      </View>
-
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operator Notes</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Field Notes</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Keep short notes for handoff, recovery, or anything the next operator should know.</Text>
         <TextInput
           style={[styles.input, styles.noteInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
           value={noteText}
           onChangeText={setNoteText}
-          placeholder="Add recovery or field notes"
+          placeholder="Add a short field note"
           placeholderTextColor={theme.muted}
           multiline
         />
-        <Pressable style={styles.secondaryButton} onPress={submitNote}>
-          <Text style={styles.secondaryButtonText}>Add Note</Text>
+        <Pressable style={styles.secondaryButton} onPress={submitNote} disabled={pendingAction === "note"}>
+          <Text style={styles.secondaryButtonText}>{pendingAction === "note" ? "Saving..." : "Save Note"}</Text>
         </Pressable>
-        {(summary?.notes ?? []).slice(-5).reverse().map((note) => (
-          <View key={note.id} style={styles.noteRow}>
-            <Text style={[styles.noteMeta, { color: theme.muted }]}>{note.actor} · {note.category}</Text>
-            <Text style={[styles.noteText, { color: theme.text }]}>{note.text}</Text>
-          </View>
-        ))}
-      </View>
-
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Raw Status</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>{status ? JSON.stringify(status, null, 2) : "Loading..."}</Text>
+        {(summary?.notes ?? []).length ? (
+          (summary?.notes ?? []).slice(-3).reverse().map((note) => (
+            <View key={note.id} style={styles.noteRow}>
+              <Text style={[styles.noteMeta, { color: theme.muted }]}>{new Date(note.at).toLocaleString()}</Text>
+              <Text style={[styles.noteText, { color: theme.text }]}>{note.text}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={[styles.metaText, { color: theme.muted }]}>No notes yet.</Text>
+        )}
       </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -706,53 +607,6 @@ const styles = StyleSheet.create({
   },
   alertMessage: {
     color: "#304863",
-  },
-  workflowBlock: {
-    gap: 8,
-  },
-  workflowHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  workflowTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#16324f",
-  },
-  workflowBadge: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    fontSize: 10,
-    fontWeight: '800',
-    overflow: 'hidden',
-  },
-  workflowBadgeDone: {
-    backgroundColor: '#e7f8ef',
-    color: '#1e704d',
-  },
-  workflowBadgeActive: {
-    backgroundColor: '#e7f1fb',
-    color: '#1f5f9f',
-  },
-  workflowBadgeIdle: {
-    backgroundColor: '#eef2f6',
-    color: '#58708a',
-  },
-  workflowStep: {
-    borderWidth: 1,
-    borderColor: "#d8e0ea",
-    borderRadius: 12,
-    padding: 10,
-    gap: 4,
-  },
-  workflowDone: {
-    backgroundColor: "#ebf7f1",
-    borderColor: "#8cc9a9",
-  },
-  workflowText: {
-    color: "#22374d",
   },
   noteRow: {
     borderTopWidth: 1,

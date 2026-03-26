@@ -51,7 +51,6 @@ type Props = {
   brinePct: number;
   setSaltPct: (value: number) => void;
   setBrinePct: (value: number) => void;
-  darkMode: boolean;
 };
 
 type DispersionRecommendation = {
@@ -103,28 +102,19 @@ function calculateFrostRisk(tempF: number, humidity: number): { riskLevel: "high
   return { riskLevel: "moderate", description: "Monitor conditions" };
 }
 
-export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrinePct, darkMode }: Props) {
+export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
   const insets = useSafeAreaInsets();
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const theme = darkMode
-    ? {
-        pageBg: '#0f1722',
-        cardBg: '#182433',
-        cardBorder: '#2a3c53',
-        title: '#d7e7fa',
-        text: '#c3d4e7',
-        muted: '#90a6bd',
-      }
-    : {
-        pageBg: '#f3f5f8',
-        cardBg: '#ffffff',
-        cardBorder: '#dce5ef',
-        title: '#16324f',
-        text: '#304863',
-        muted: '#63788e',
-      };
+  const theme = {
+    pageBg: '#f3f5f8',
+    cardBg: '#ffffff',
+    cardBorder: '#dce5ef',
+    title: '#16324f',
+    text: '#304863',
+    muted: '#63788e',
+  };
 
   // City and API key
   const API_KEY = "e324705094164f5dc98161647cccc83a";

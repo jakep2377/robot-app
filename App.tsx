@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text, useColorScheme } from 'react-native';
+import { Text } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
@@ -18,24 +18,23 @@ export default function App() {
   const [serverUrl] = useState(DEFAULT_SERVER_URL);
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
-  const darkMode = useColorScheme() === 'dark';
 
   return (
     <SafeAreaProvider>
-      <StatusBar style={darkMode ? 'light' : 'dark'} translucent backgroundColor="transparent" />
+      <StatusBar style="dark" translucent backgroundColor="transparent" />
       <NavigationContainer>
       <Tab.Navigator
         screenOptions={{
           headerShown: false,
-          tabBarActiveTintColor: darkMode ? '#9fd0ff' : '#1f5f9f',
-          tabBarInactiveTintColor: darkMode ? '#7f97b2' : '#6b7f93',
+          tabBarActiveTintColor: '#1f5f9f',
+          tabBarInactiveTintColor: '#6b7f93',
           tabBarLabelStyle: {
             fontSize: 12,
             fontWeight: '700',
           },
           tabBarStyle: {
-            backgroundColor: darkMode ? '#142233' : '#f8fbff',
-            borderTopColor: darkMode ? '#2b3e54' : '#d7e2ee',
+            backgroundColor: '#f8fbff',
+            borderTopColor: '#d7e2ee',
             borderTopWidth: 1,
             height: 64,
             paddingTop: 6,
@@ -59,7 +58,6 @@ export default function App() {
               brinePct={brinePct}
               setSaltPct={setSaltPct}
               setBrinePct={setBrinePct}
-              darkMode={darkMode}
             />
           )}
         </Tab.Screen>
@@ -72,7 +70,7 @@ export default function App() {
             )
           }}
         >
-          {() => <AreaMapScreen serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} darkMode={darkMode} />}
+          {() => <AreaMapScreen serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} />}
         </Tab.Screen>
         <Tab.Screen
           name="Weather"
@@ -89,7 +87,6 @@ export default function App() {
               brinePct={brinePct}
               setSaltPct={setSaltPct}
               setBrinePct={setBrinePct}
-              darkMode={darkMode}
             />
           )}
         </Tab.Screen>
@@ -102,7 +99,7 @@ export default function App() {
             ),
           }}
         >
-          {() => <HelpPane visible={true} onClose={() => {}} darkMode={darkMode} />}
+          {() => <HelpPane visible={true} onClose={() => {}} />}
         </Tab.Screen>
       </Tab.Navigator>
     </NavigationContainer>
