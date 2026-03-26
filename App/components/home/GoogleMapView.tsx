@@ -279,7 +279,7 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+      <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 8 }]}> 
         <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}> 
           {drawingMode ? '\u270f Drawing' : (selection ? '\u2713 Area Set' : '\u25cf Browse')}
         </Text>
@@ -396,8 +396,8 @@ const styles = StyleSheet.create({
   },
   modeChip: {
     position: 'absolute',
-    left: 16,
-    top: 70,
+    left: 8,
+    top: 64,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',

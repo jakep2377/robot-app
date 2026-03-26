@@ -121,7 +121,6 @@ export default function ControllerScreen({
   setBrinePct,
 }: Props) {
   const insets = useSafeAreaInsets();
-  const [lastCommand, setLastCommand] = useState("NONE");
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [summary, setSummary] = useState<SupervisionSummary | null>(null);
   const [health, setHealth] = useState<HealthPayload | null>(null);
@@ -129,6 +128,7 @@ export default function ControllerScreen({
   const [noteText, setNoteText] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
+  const [manualModeOpen, setManualModeOpen] = useState(false);
   const refreshInFlight = useRef(false);
 
   const refresh = async () => {
@@ -194,7 +194,6 @@ export default function ControllerScreen({
 
   const performCommand = async (command: string) => {
     setPendingAction(command);
-    setLastCommand(command.toUpperCase());
     try {
       await postText(serverUrl, "/command", command.toUpperCase());
       setError(null);
@@ -252,6 +251,9 @@ export default function ControllerScreen({
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
   const missionState = summary?.mission?.state ?? status?.state ?? "UNKNOWN";
   const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
+  const hasCriticalAlert = (summary?.alerts ?? []).some((alert) => alert.level === "critical");
+  const latestAlert = summary?.alerts?.[summary.alerts.length - 1] ?? null;
+  const recentNotes = (summary?.notes ?? []).slice(-2).reverse();
   const theme = {
     pageBg: '#f3f5f8',
     cardBg: '#ffffff',
@@ -267,7 +269,7 @@ export default function ControllerScreen({
 
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
-      <Text style={[styles.title, { color: theme.title }]}>Robot Supervision</Text>
+      <Text style={[styles.title, { color: theme.title }]}>Robot Controller</Text>
       <View style={styles.statusRow}>
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
           <Text style={styles.statusPillText}>{socketState === 'live' ? '● Live' : '◌ Polling'}</Text>
@@ -275,47 +277,82 @@ export default function ControllerScreen({
         <View style={[styles.statusPill, styles.statusPillMission]}>
           <Text style={styles.statusPillText}>{missionState}</Text>
         </View>
-        {summary?.robot?.state ? (
-          <View style={[styles.statusPill, styles.statusPillRobot]}>
-            <Text style={styles.statusPillText}>Robot: {summary.robot.state}</Text>
-          </View>
-        ) : null}
-        <View style={[styles.statusPill, styles.statusPillMaterial]}>
-          <Text style={styles.statusPillText}>🧂 {saltPct}% · 💧 {brinePct}%</Text>
+        <View style={[styles.statusPill, hasCriticalAlert ? styles.statusPillCritical : styles.statusPillOk]}>
+          <Text style={styles.statusPillText}>{hasCriticalAlert ? "Critical Alert" : "No Critical Alerts"}</Text>
         </View>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Overview</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Mission: {missionState}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Coverage: {coveragePct.toFixed(1)}%</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Robot: {summary?.robot?.state ?? status?.state ?? "UNKNOWN"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Age: {summary?.robot?.ageMs ?? 0} ms</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>LoRa WP State: {summary?.lora?.wpPushState ?? "unknown"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Bridge Degraded: {summary?.lora?.degraded ? "YES" : "NO"} {summary?.lora?.consecutiveFailures ? `(fails: ${summary.lora.consecutiveFailures})` : ""}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Queue Depth: {status?.queue_depth ?? 0}</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Quick Status</Text>
+        <View style={styles.quickGrid}>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot</Text><Text style={[styles.quickValue, { color: theme.text }]}>{summary?.robot?.state ?? status?.state ?? "UNKNOWN"}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Server</Text><Text style={[styles.quickValue, { color: theme.text }]}>{health?.ready ? "Ready" : "Not Ready"}</Text></View>
+        </View>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Telemetry {health?.checks?.telemetry ? "OK" : "Stale"} · Bridge {health?.checks?.bridge ? "OK" : "Issue"} · Queue {status?.queue_depth ?? 0}</Text>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Server Health</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Ready: {health?.ready ? "YES" : "NO"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>DB: {health?.checks?.db ? "OK" : "ISSUE"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Bridge: {health?.checks?.bridge ? "OK" : "ISSUE"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Telemetry: {health?.checks?.telemetry ? "OK" : "STALE"}</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
+        <View style={styles.actionGrid}>
+          <ActionButton label="Push WP" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} />
+          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} />
+          <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} />
+          <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} />
+          <ActionButton label="Complete" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} />
+          <ActionButton label="Abort" onPress={() => performAction("mission-abort")} disabled={!allowedAction("mission-abort")?.enabled} busy={pendingAction === "mission-abort"} danger />
+        </View>
+
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Emergency</Text>
+        <View style={styles.actionGrid}>
+          <ActionButton label="E-Stop" onPress={() => performCommand("ESTOP")} danger busy={pendingAction === "ESTOP"} />
+          <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
+        </View>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Safety Policies</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Fail-safe: {summary?.safety?.telemetryFailsafeEnabled ? "ENABLED" : "DISABLED"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Action: {summary?.safety?.telemetryFailsafeAction ?? "N/A"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Last Telemetry Trigger: {summary?.safety?.telemetryFailsafeAt ? new Date(summary.safety.telemetryFailsafeAt).toLocaleString() : "none"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Geofence Fail-safe: {summary?.safety?.geofenceFailsafeEnabled ? "ENABLED" : "DISABLED"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Geofence Action: {summary?.safety?.geofenceFailsafeAction ?? "N/A"}</Text>
-        <Text style={[styles.metric, { color: theme.text }]}>Last Geofence Trigger: {summary?.safety?.geofenceFailsafeAt ? new Date(summary.safety.geofenceFailsafeAt).toLocaleString() : "none"}</Text>
+        <View style={styles.menuHeaderRow}>
+          <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Manual Mode</Text>
+          <Pressable style={styles.menuToggleButton} onPress={() => setManualModeOpen((current) => !current)}>
+            <Text style={styles.menuToggleButtonText}>{manualModeOpen ? "Hide" : "Show"}</Text>
+          </Pressable>
+        </View>
+
+        <Text style={[styles.metaText, { color: theme.muted }]}>Manual controls are hidden by default to reduce clutter.</Text>
+
+        {manualModeOpen ? (
+          <>
+            <View style={styles.dpad}>
+              <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
+                <Text style={styles.commandText}>UP</Text>
+              </Pressable>
+              <View style={styles.row}>
+                <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
+                  <Text style={styles.commandText}>LEFT</Text>
+                </Pressable>
+                <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
+                  <Text style={styles.commandText}>STOP</Text>
+                </Pressable>
+                <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
+                  <Text style={styles.commandText}>RIGHT</Text>
+                </Pressable>
+              </View>
+              <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
+                <Text style={styles.commandText}>DOWN</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.actionGrid}>
+              <ActionButton label="Manual" onPress={() => performCommand("MANUAL")} busy={pendingAction === "MANUAL"} />
+              <ActionButton label="Pause" onPress={() => performCommand("PAUSE")} busy={pendingAction === "PAUSE"} />
+            </View>
+          </>
+        ) : null}
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Dispersion Defaults</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Dispersion</Text>
         <PercentSlider
           label="Salt"
           value={saltPct}
@@ -329,61 +366,16 @@ export default function ControllerScreen({
           onChange={setBrinePct}
           accentColor="#2c6fb7"
         />
-
-        <Text style={[styles.metaText, { color: theme.muted }]}>These values are applied when planning path waypoints from the map.</Text>
-      </View>
-
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Manual Drive</Text>
-        <View style={styles.dpad}>
-          <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
-            <Text style={styles.commandText}>UP</Text>
-          </Pressable>
-          <View style={styles.row}>
-            <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
-              <Text style={styles.commandText}>LEFT</Text>
-            </Pressable>
-            <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
-              <Text style={styles.commandText}>STOP</Text>
-            </Pressable>
-            <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
-              <Text style={styles.commandText}>RIGHT</Text>
-            </Pressable>
-          </View>
-          <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
-            <Text style={styles.commandText}>DOWN</Text>
-          </Pressable>
-        </View>
-        <View style={styles.actionGrid}>
-          <ActionButton label="Manual" onPress={() => performCommand("MANUAL")} busy={pendingAction === "MANUAL"} />
-          <ActionButton label="Pause" onPress={() => performCommand("PAUSE")} busy={pendingAction === "PAUSE"} />
-          <ActionButton label="E-Stop" onPress={() => performCommand("ESTOP")} danger busy={pendingAction === "ESTOP"} />
-          <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
-        </View>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Last Command: {lastCommand}</Text>
-      </View>
-
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Actions</Text>
-        <View style={styles.actionGrid}>
-          <ActionButton label="Push WP" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} />
-          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} />
-          <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} />
-          <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} />
-          <ActionButton label="Abort" onPress={() => performAction("mission-abort")} disabled={!allowedAction("mission-abort")?.enabled} busy={pendingAction === "mission-abort"} danger />
-          <ActionButton label="Complete" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} />
-        </View>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Used when planning path waypoints from the map.</Text>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Alerts</Text>
-        {summary?.alerts.length ? (
-          summary.alerts.map((alert) => (
-            <View key={`${alert.code}-${alert.message}`} style={[styles.alertRow, alert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
-              <Text style={styles.alertCode}>{alert.code}</Text>
-              <Text style={styles.alertMessage}>{alert.message}</Text>
-            </View>
-          ))
+        {latestAlert ? (
+          <View style={[styles.alertRow, latestAlert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
+            <Text style={styles.alertCode}>{latestAlert.code}</Text>
+            <Text style={styles.alertMessage}>{latestAlert.message}</Text>
+          </View>
         ) : (
           <Text style={[styles.metaText, { color: theme.muted }]}>No active alerts.</Text>
         )}
@@ -403,8 +395,8 @@ export default function ControllerScreen({
         <Pressable style={styles.secondaryButton} onPress={submitNote} disabled={pendingAction === "note"}>
           <Text style={styles.secondaryButtonText}>{pendingAction === "note" ? "Saving..." : "Save Note"}</Text>
         </Pressable>
-        {(summary?.notes ?? []).length ? (
-          (summary?.notes ?? []).slice(-3).reverse().map((note) => (
+        {recentNotes.length ? (
+          recentNotes.map((note) => (
             <View key={note.id} style={styles.noteRow}>
               <Text style={[styles.noteMeta, { color: theme.muted }]}>{new Date(note.at).toLocaleString()}</Text>
               <Text style={[styles.noteText, { color: theme.text }]}>{note.text}</Text>
@@ -493,6 +485,12 @@ const styles = StyleSheet.create({
   statusPillMaterial: {
     backgroundColor: '#4a5a6a',
   },
+  statusPillOk: {
+    backgroundColor: '#1a9a5b',
+  },
+  statusPillCritical: {
+    backgroundColor: '#b63d3d',
+  },
   card: {
     backgroundColor: "#ffffff",
     borderWidth: 1,
@@ -538,6 +536,45 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#304863",
   },
+  quickGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  quickItem: {
+    width: "47%",
+    borderWidth: 1,
+    borderColor: "#e3eaf2",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "#fbfcfe",
+  },
+  quickLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+  },
+  quickValue: {
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  menuHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  menuToggleButton: {
+    backgroundColor: "#16324f",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  menuToggleButtonText: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 12,
+  },
   metaText: {
     fontSize: 12,
     color: "#63788e",
@@ -545,6 +582,7 @@ const styles = StyleSheet.create({
   dpad: {
     alignItems: "center",
     gap: 10,
+    marginTop: 6,
   },
   row: {
     flexDirection: "row",

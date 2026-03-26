@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import ControllerScreen from './App/screens/ControllerScreen';
 import AreaMapScreen from './App/screens/AreaMapScreen';
@@ -28,6 +28,9 @@ export default function App() {
           headerShown: false,
           tabBarActiveTintColor: '#1f5f9f',
           tabBarInactiveTintColor: '#6b7f93',
+          tabBarIconStyle: {
+            marginTop: 2,
+          },
           tabBarLabelStyle: {
             fontSize: 12,
             fontWeight: '700',
@@ -47,7 +50,7 @@ export default function App() {
           options={{
             tabBarLabel: 'Controller',
             tabBarIcon: ({ color, size }) => (
-              <Text style={{ color, fontSize: size }}>🎮</Text>
+              <MaterialCommunityIcons name="gamepad-variant" size={size + 1} color={color} />
             ),
           }}
         >
@@ -66,7 +69,7 @@ export default function App() {
           options={{
             tabBarLabel: 'Area Map',
             tabBarIcon: ({ color, size }) => (
-              <Text style={{ color, fontSize: size }}>🗺️</Text>
+              <MaterialCommunityIcons name="map-marker-path" size={size + 1} color={color} style={{ transform: [{ scaleX: -1 }] }} />
             )
           }}
         >
@@ -77,7 +80,7 @@ export default function App() {
           options={{
             tabBarLabel: 'Weather',
             tabBarIcon: ({ color, size }) => (
-              <Text style={{ color, fontSize: size }}>❄️</Text>
+              <MaterialCommunityIcons name="weather-snowy" size={size + 1} color={color} />
             ),
           }}
         >
@@ -95,7 +98,7 @@ export default function App() {
           options={{
             tabBarLabel: 'Help',
             tabBarIcon: ({ color, size }) => (
-              <Text style={{ color, fontSize: size }}>❓</Text>
+              <MaterialCommunityIcons name="help-circle-outline" size={size + 1} color={color} />
             ),
           }}
         >
