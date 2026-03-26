@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "robot-app",
+    "name": "Navigator",
     "slug": "robot-app",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/salt.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
 
     "splash": {
       "image": "./assets/splash-icon.png",

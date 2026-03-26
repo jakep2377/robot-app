@@ -1,174 +1,775 @@
-import React, { useEffect, useRef, useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
+import React, { useMemo, useEffect, useRef, useState } from "react";
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-const BASE_IP = "192.168.4.1"; // AP mode default
-const BASE_URL = `http://${BASE_IP}`;
+import { getJson, getJsonAllowError, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
+import PercentSlider from "../components/common/PercentSlider";
 
-function tryParseJson(text: string) {
-  try {
-    return { ok: true as const, value: JSON.parse(text) };
-  } catch {
-    return { ok: false as const, value: null };
-  }
-}
-
-export default function ControllerScreen() {
-  const [lastCommand, setLastCommand] = useState("None");
-  const [status, setStatus] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Prevent overlapping requests (helps with "slow" behavior)
-  const statusInFlight = useRef(false);
-
-  // GET /status
-  // Make sure only one request is in-flight at a time
-  const fetchStatus = async () => {
-  if (statusInFlight.current) return;
-  statusInFlight.current = true;
-  
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1200);
-
-    let res: Response;
-    try {
-      // Send GET request with a timeout
-      res = await fetch(`${BASE_URL}/status`, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const text = (await res.text()).trim();
-
-    if (!res.ok) {
-      // Real HTTP error - show it
-      throw new Error(`HTTP ${res.status}: ${text.slice(0, 80)}`);
-    }
-
-    if (!text) {
-      // Empty body - ignore
-      return;
-    }
-
-    const parsed = tryParseJson(text);
-    if (!parsed.ok) {
-      // Transient partial response / disconnect - ignore silently
-      return;
-    }
-
-    setStatus(parsed.value);
-    setError(null);
-  } catch (e: any) {
-    // AbortError / transient network errors: don't spam the UI
-    const msg = String(e?.message || e);
-    if (msg.includes("aborted") || msg.includes("Network request failed")) {
-      return;
-    }
-    setError(msg);
-  } finally {
-    statusInFlight.current = false;
-  }
+type AllowedAction = {
+  id: string;
+  enabled: boolean;
+  reason: string | null;
 };
 
-  // POST /command
-  const sendCommand = async (cmd: string) => {
-    setLastCommand(cmd);
+type WorkflowAck = {
+  checked: boolean;
+  actor: string;
+  note: string | null;
+  at: number;
+};
+
+type WorkflowStep = {
+  id: string;
+  title: string;
+  kind: "manual" | "derived";
+  checked: boolean;
+  ready: boolean;
+  ack?: WorkflowAck | null;
+};
+
+type Workflow = {
+  id: string;
+  title: string;
+  active: boolean;
+  complete: boolean;
+  steps: WorkflowStep[];
+};
+
+type OperatorNote = {
+  id: string;
+  text: string;
+  category: string;
+  actor: string;
+  at: number;
+};
+
+type Alert = {
+  level: string;
+  code: string;
+  message: string;
+  at?: number;
+};
+
+type SupervisionSummary = {
+  mission: {
+    id: number;
+    state: string;
+    coveragePct: number;
+    faultCount: number;
+    cmdCount: number;
+  } | null;
+  lora: {
+    wpPushState?: string;
+    lastCmd?: string | null;
+    degraded?: boolean;
+    consecutiveFailures?: number;
+  } | null;
+  safety?: {
+    telemetryFailsafeEnabled?: boolean;
+    telemetryFailsafeAction?: string;
+    telemetryFailsafeAt?: number | null;
+    telemetryFailsafeReason?: string | null;
+    geofenceFailsafeEnabled?: boolean;
+    geofenceFailsafeAction?: string;
+    geofenceFailsafeAt?: number | null;
+    geofenceFailsafeReason?: string | null;
+  } | null;
+  robot: {
+    state?: string;
+    ageMs?: number | null;
+    stale?: boolean;
+  } | null;
+  coverage: {
+    coveredPct?: number;
+    coveragePercent?: number;
+  } | null;
+  alerts: Alert[];
+  allowedActions: AllowedAction[];
+  workflows: Workflow[];
+  notes: OperatorNote[];
+};
+
+type StatusPayload = {
+  battery?: number;
+  state?: string;
+  mode?: string;
+  last_cmd?: string | null;
+  last_fault?: unknown;
+  queue_depth?: number;
+};
+
+type HealthPayload = {
+  ok?: boolean;
+  ready?: boolean;
+  checks?: {
+    db?: boolean;
+    bridge?: boolean;
+    telemetry?: boolean;
+  };
+  telemetryStale?: boolean;
+};
+
+type SummaryResponse = {
+  ok: boolean;
+  summary: SupervisionSummary;
+};
+
+type StatusResponse = StatusPayload;
+
+type Props = {
+  serverUrl: string;
+  saltPct: number;
+  brinePct: number;
+  setSaltPct: (value: number) => void;
+  setBrinePct: (value: number) => void;
+  darkMode: boolean;
+};
+
+const MISSION_ENDPOINTS: Record<string, string> = {
+  "mission-start": "/api/mission/start",
+  "mission-pause": "/api/mission/pause",
+  "mission-resume": "/api/mission/resume",
+  "mission-abort": "/api/mission/abort",
+  "mission-complete": "/api/mission/complete",
+  "push-waypoints": "/api/lora/push-waypoints",
+};
+
+export default function ControllerScreen({
+  serverUrl,
+  saltPct,
+  brinePct,
+  setSaltPct,
+  setBrinePct,
+  darkMode,
+}: Props) {
+  const insets = useSafeAreaInsets();
+  const [lastCommand, setLastCommand] = useState("NONE");
+  const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [summary, setSummary] = useState<SupervisionSummary | null>(null);
+  const [health, setHealth] = useState<HealthPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [noteText, setNoteText] = useState("");
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [socketState, setSocketState] = useState("polling");
+  const refreshInFlight = useRef(false);
+
+  const refresh = async () => {
+    if (refreshInFlight.current) {
+      return;
+    }
+    refreshInFlight.current = true;
 
     try {
-      // Send command as JSON
-      const res = await fetch(`${BASE_URL}/command`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cmd }),
-      });
+      const [statusData, summaryData, healthResult] = await Promise.all([
+        getJson<StatusResponse>(serverUrl, "/status"),
+        getJson<SummaryResponse>(serverUrl, "/api/supervision/summary"),
+        getJsonAllowError<HealthPayload>(serverUrl, "/api/health"),
+      ]);
 
-      // /command returns plain text like "OK"
-      const text = await res.text();
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+      setStatus(statusData);
+      setSummary(summaryData.summary);
+      setHealth(healthResult.data);
       setError(null);
-
-      // Refresh status after sending a command
-      fetchStatus();
-    } catch (e: any) {
-      setError(e.message);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to refresh server state");
+    } finally {
+      refreshInFlight.current = false;
     }
   };
 
-  // Poll status periodically
   useEffect(() => {
-    fetchStatus();
-    const t = setInterval(fetchStatus, 2000); // slower + less overlap
-    return () => clearInterval(t);
-  }, []);
+    refresh();
+    const timer = setInterval(refresh, 2500);
+    return () => clearInterval(timer);
+  }, [serverUrl]);
+
+  useEffect(() => {
+    const socket = new WebSocket(toWebSocketUrl(serverUrl));
+
+    socket.onopen = () => setSocketState("live");
+    socket.onerror = () => setSocketState("polling");
+    socket.onclose = () => setSocketState("polling");
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data as string) as {
+          event?: string;
+          payload?: unknown;
+        };
+
+        if (message.event === "supervision.updated" && message.payload) {
+          setSummary(message.payload as SupervisionSummary);
+          return;
+        }
+
+        if (message.event === "state.snapshot" || message.event === "mission.updated" || message.event === "telemetry.updated" || message.event === "fault.received") {
+          refresh();
+        }
+      } catch {
+        setSocketState("polling");
+      }
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, [serverUrl]);
+
+  const performCommand = async (command: string) => {
+    setPendingAction(command);
+    setLastCommand(command.toUpperCase());
+    try {
+      await postText(serverUrl, "/command", command.toUpperCase());
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `Command failed: ${command}`);
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const performAction = async (actionId: string) => {
+    const endpoint = MISSION_ENDPOINTS[actionId];
+    if (!endpoint) {
+      if (actionId === "command-reset") {
+        await performCommand("RESET");
+      }
+      return;
+    }
+
+    setPendingAction(actionId);
+    try {
+      await postJson(serverUrl, endpoint, {});
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `Action failed: ${actionId}`);
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const toggleWorkflowStep = async (workflowId: string, step: WorkflowStep) => {
+    if (step.kind !== "manual") {
+      return;
+    }
+
+    setPendingAction(`${workflowId}:${step.id}`);
+    try {
+      await postJson(serverUrl, `/api/operator/workflows/${workflowId}/steps/${step.id}`, {
+        checked: !step.checked,
+        actor: "field-op",
+        note: step.checked ? null : "Acknowledged from mobile app",
+      });
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `Workflow update failed: ${step.title}`);
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const submitNote = async () => {
+    if (!noteText.trim()) {
+      return;
+    }
+
+    setPendingAction("note");
+    try {
+      await postJson(serverUrl, "/api/operator/notes", {
+        text: noteText.trim(),
+        category: "field",
+        actor: "field-op",
+      });
+      setNoteText("");
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Note submission failed");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
+  const missionState = summary?.mission?.state ?? status?.state ?? "UNKNOWN";
+  const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
+  const workflows = useMemo(() => {
+    const all = summary?.workflows ?? [];
+    return [...all].sort((a, b) => Number(b.active) - Number(a.active) || Number(a.complete) - Number(b.complete));
+  }, [summary?.workflows]);
+  const theme = darkMode
+    ? {
+        pageBg: '#0f1722',
+        cardBg: '#182433',
+        cardBorder: '#27384e',
+        title: '#e8f0fb',
+        sectionTitle: '#d8e9ff',
+        text: '#c5d6e8',
+        muted: '#8fa4ba',
+        inputBg: '#101d2b',
+        inputBorder: '#2b3d55',
+        inputText: '#deebfa',
+      }
+    : {
+        pageBg: '#f3f5f8',
+        cardBg: '#ffffff',
+        cardBorder: '#dde5ef',
+        title: '#13233a',
+        sectionTitle: '#16324f',
+        text: '#304863',
+        muted: '#63788e',
+        inputBg: '#fbfcfe',
+        inputBorder: '#c8d0da',
+        inputText: '#13233a',
+      };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Robot Controller</Text>
-
-      {/* D-Pad */}
-      <View style={styles.dpad}>
-        <TouchableOpacity style={styles.button} onPress={() => sendCommand("forward")}>
-          <Text style={styles.btnText}>↑</Text>
-        </TouchableOpacity>
-
-        <View style={styles.row}>
-          <TouchableOpacity style={styles.button} onPress={() => sendCommand("left")}>
-            <Text style={styles.btnText}>←</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.button, styles.stopButton]}
-            onPress={() => sendCommand("stop")}
-          >
-            <Text style={styles.btnText}>■</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.button} onPress={() => sendCommand("right")}>
-            <Text style={styles.btnText}>→</Text>
-          </TouchableOpacity>
+    <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
+      <Text style={[styles.title, { color: theme.title }]}>Robot Supervision</Text>
+      <View style={styles.statusRow}>
+        <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
+          <Text style={styles.statusPillText}>{socketState === 'live' ? '● Live' : '◌ Polling'}</Text>
         </View>
-
-        <TouchableOpacity style={styles.button} onPress={() => sendCommand("backward")}>
-          <Text style={styles.btnText}>↓</Text>
-        </TouchableOpacity>
+        <View style={[styles.statusPill, styles.statusPillMission]}>
+          <Text style={styles.statusPillText}>{missionState}</Text>
+        </View>
+        {summary?.robot?.state ? (
+          <View style={[styles.statusPill, styles.statusPillRobot]}>
+            <Text style={styles.statusPillText}>Robot: {summary.robot.state}</Text>
+          </View>
+        ) : null}
+        <View style={[styles.statusPill, styles.statusPillMaterial]}>
+          <Text style={styles.statusPillText}>🧂 {saltPct}% · 💧 {brinePct}%</Text>
+        </View>
       </View>
 
-      {/* Status */}
-      <Text style={styles.status}>
-        Last Command: <Text style={styles.cmd}>{lastCommand}</Text>
-      </Text>
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Overview</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Mission: {missionState}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Coverage: {coveragePct.toFixed(1)}%</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Robot: {summary?.robot?.state ?? status?.state ?? "UNKNOWN"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Age: {summary?.robot?.ageMs ?? 0} ms</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>LoRa WP State: {summary?.lora?.wpPushState ?? "unknown"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Bridge Degraded: {summary?.lora?.degraded ? "YES" : "NO"} {summary?.lora?.consecutiveFailures ? `(fails: ${summary.lora.consecutiveFailures})` : ""}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Queue Depth: {status?.queue_depth ?? 0}</Text>
+      </View>
 
-      {/* Base station status (from /status) */}
-      <Text style={styles.small}>Base: {BASE_IP}</Text>
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Server Health</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Ready: {health?.ready ? "YES" : "NO"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>DB: {health?.checks?.db ? "OK" : "ISSUE"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Bridge: {health?.checks?.bridge ? "OK" : "ISSUE"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Telemetry: {health?.checks?.telemetry ? "OK" : "STALE"}</Text>
+      </View>
 
-      {error ? <Text style={styles.error}>Error: {error}</Text> : null}
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Safety Policies</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Fail-safe: {summary?.safety?.telemetryFailsafeEnabled ? "ENABLED" : "DISABLED"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Telemetry Action: {summary?.safety?.telemetryFailsafeAction ?? "N/A"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Last Telemetry Trigger: {summary?.safety?.telemetryFailsafeAt ? new Date(summary.safety.telemetryFailsafeAt).toLocaleString() : "none"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Geofence Fail-safe: {summary?.safety?.geofenceFailsafeEnabled ? "ENABLED" : "DISABLED"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Geofence Action: {summary?.safety?.geofenceFailsafeAction ?? "N/A"}</Text>
+        <Text style={[styles.metric, { color: theme.text }]}>Last Geofence Trigger: {summary?.safety?.geofenceFailsafeAt ? new Date(summary.safety.geofenceFailsafeAt).toLocaleString() : "none"}</Text>
+      </View>
 
-      <Text style={styles.small}>
-        Robot Status: {status ? JSON.stringify(status) : "Loading..."}
-      </Text>
-    </View>
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Dispersion Defaults</Text>
+        <PercentSlider
+          label="Salt"
+          value={saltPct}
+          onChange={setSaltPct}
+          accentColor="#2d8a65"
+        />
+
+        <PercentSlider
+          label="Brine"
+          value={brinePct}
+          onChange={setBrinePct}
+          accentColor="#2c6fb7"
+        />
+
+        <Text style={[styles.metaText, { color: theme.muted }]}>These values are applied when planning path waypoints from the map.</Text>
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Manual Drive</Text>
+        <View style={styles.dpad}>
+          <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
+            <Text style={styles.commandText}>UP</Text>
+          </Pressable>
+          <View style={styles.row}>
+            <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
+              <Text style={styles.commandText}>LEFT</Text>
+            </Pressable>
+            <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
+              <Text style={styles.commandText}>STOP</Text>
+            </Pressable>
+            <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
+              <Text style={styles.commandText}>RIGHT</Text>
+            </Pressable>
+          </View>
+          <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
+            <Text style={styles.commandText}>DOWN</Text>
+          </Pressable>
+        </View>
+        <View style={styles.actionGrid}>
+          <ActionButton label="Manual" onPress={() => performCommand("MANUAL")} busy={pendingAction === "MANUAL"} />
+          <ActionButton label="Pause" onPress={() => performCommand("PAUSE")} busy={pendingAction === "PAUSE"} />
+          <ActionButton label="E-Stop" onPress={() => performCommand("ESTOP")} danger busy={pendingAction === "ESTOP"} />
+          <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
+        </View>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Last Command: {lastCommand}</Text>
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Actions</Text>
+        <View style={styles.actionGrid}>
+          <ActionButton label="Push WP" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} />
+          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} />
+          <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} />
+          <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} />
+          <ActionButton label="Abort" onPress={() => performAction("mission-abort")} disabled={!allowedAction("mission-abort")?.enabled} busy={pendingAction === "mission-abort"} danger />
+          <ActionButton label="Complete" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} />
+        </View>
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Alerts</Text>
+        {summary?.alerts.length ? (
+          summary.alerts.map((alert) => (
+            <View key={`${alert.code}-${alert.message}`} style={[styles.alertRow, alert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
+              <Text style={styles.alertCode}>{alert.code}</Text>
+              <Text style={styles.alertMessage}>{alert.message}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={[styles.metaText, { color: theme.muted }]}>No active alerts.</Text>
+        )}
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operator Workflows</Text>
+        {workflows.map((workflow) => (
+          <View key={workflow.id} style={styles.workflowBlock}>
+            <View style={styles.workflowHeaderRow}>
+              <Text style={[styles.workflowTitle, { color: theme.sectionTitle }]}>{workflow.title}</Text>
+              <Text style={[
+                styles.workflowBadge,
+                workflow.complete ? styles.workflowBadgeDone : workflow.active ? styles.workflowBadgeActive : styles.workflowBadgeIdle,
+              ]}>
+                {workflow.complete ? 'COMPLETE' : workflow.active ? 'ACTIVE' : 'STANDBY'}
+              </Text>
+            </View>
+            {workflow.steps.map((step) => (
+              <Pressable
+                key={step.id}
+                onPress={() => toggleWorkflowStep(workflow.id, step)}
+                disabled={step.kind !== "manual" || (!step.ready && !step.checked)}
+                style={[styles.workflowStep, step.checked ? styles.workflowDone : null]}
+              >
+                <Text style={[styles.workflowText, { color: theme.text }]}>{step.checked ? "✅" : "⬜"} {step.title}</Text>
+                <Text style={[styles.metaText, { color: theme.muted }]}>
+                  {step.kind === "manual"
+                    ? (step.ready || step.checked ? "Operator check: tap to toggle" : "Blocked: waiting on prerequisites")
+                    : "Auto-check from server state"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ))}
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operator Notes</Text>
+        <TextInput
+          style={[styles.input, styles.noteInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+          value={noteText}
+          onChangeText={setNoteText}
+          placeholder="Add recovery or field notes"
+          placeholderTextColor={theme.muted}
+          multiline
+        />
+        <Pressable style={styles.secondaryButton} onPress={submitNote}>
+          <Text style={styles.secondaryButtonText}>Add Note</Text>
+        </Pressable>
+        {(summary?.notes ?? []).slice(-5).reverse().map((note) => (
+          <View key={note.id} style={styles.noteRow}>
+            <Text style={[styles.noteMeta, { color: theme.muted }]}>{note.actor} · {note.category}</Text>
+            <Text style={[styles.noteText, { color: theme.text }]}>{note.text}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Raw Status</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>{status ? JSON.stringify(status, null, 2) : "Loading..."}</Text>
+      </View>
+
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+    </ScrollView>
+  );
+}
+
+function ActionButton({
+  label,
+  onPress,
+  disabled,
+  busy,
+  danger,
+}: {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  busy?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled || busy}
+      style={[
+        styles.actionButton,
+        danger ? styles.actionDanger : null,
+        disabled || busy ? styles.actionDisabled : null,
+      ]}
+    >
+      <Text style={styles.actionText}>{busy ? `${label}...` : label}</Text>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
-  title: { fontSize: 26, fontWeight: "bold", marginBottom: 20 },
-  dpad: { alignItems: "center", marginBottom: 30 },
-  row: { flexDirection: "row" },
-  button: {
-    width: 70,
-    height: 70,
-    backgroundColor: "#1976D2",
-    borderRadius: 35,
-    justifyContent: "center",
-    alignItems: "center",
-    margin: 10,
+  container: {
+    padding: 16,
+    gap: 14,
+    backgroundColor: "#f3f5f8",
   },
-  stopButton: { backgroundColor: "#D32F2F" },
-  btnText: { fontSize: 32, color: "white", fontWeight: "bold" },
-  status: { marginTop: 20, fontSize: 18 },
-  cmd: { fontWeight: "bold" },
-  small: { marginTop: 10, fontSize: 12, textAlign: "center" },
-  error: { marginTop: 8, color: "red", fontSize: 13, textAlign: "center" },
+  title: {
+    fontSize: 28,
+    fontWeight: "700",
+    color: "#13233a",
+    textAlign: "center",
+  },
+  statusRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  statusPill: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  statusPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  statusPillLive: {
+    backgroundColor: '#1a9a5b',
+  },
+  statusPillPoll: {
+    backgroundColor: '#b06414',
+  },
+  statusPillMission: {
+    backgroundColor: '#2c6fb7',
+  },
+  statusPillRobot: {
+    backgroundColor: '#5a3a8a',
+  },
+  statusPillMaterial: {
+    backgroundColor: '#4a5a6a',
+  },
+  card: {
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: '#dde5ef',
+    borderRadius: 16,
+    padding: 16,
+    gap: 10,
+    shadowColor: "#000000",
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#16324f",
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#c8d0da",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "#fbfcfe",
+  },
+  noteInput: {
+    minHeight: 90,
+    textAlignVertical: "top",
+  },
+  secondaryButton: {
+    alignSelf: "flex-start",
+    backgroundColor: "#16324f",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  secondaryButtonText: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
+  metric: {
+    fontSize: 15,
+    color: "#304863",
+  },
+  metaText: {
+    fontSize: 12,
+    color: "#63788e",
+  },
+  dpad: {
+    alignItems: "center",
+    gap: 10,
+  },
+  row: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  commandButton: {
+    minWidth: 88,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#2c6fb7",
+    borderRadius: 999,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+  },
+  stopButton: {
+    backgroundColor: "#b63d3d",
+  },
+  commandText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  actionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  actionButton: {
+    minWidth: 96,
+    backgroundColor: "#2d8a65",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  actionDanger: {
+    backgroundColor: "#b63d3d",
+  },
+  actionDisabled: {
+    opacity: 0.45,
+  },
+  actionText: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
+  alertRow: {
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  alertWarning: {
+    backgroundColor: "#fff3dd",
+  },
+  alertCritical: {
+    backgroundColor: "#ffe1e1",
+  },
+  alertCode: {
+    fontWeight: "700",
+    color: "#16324f",
+  },
+  alertMessage: {
+    color: "#304863",
+  },
+  workflowBlock: {
+    gap: 8,
+  },
+  workflowHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  workflowTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#16324f",
+  },
+  workflowBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    fontSize: 10,
+    fontWeight: '800',
+    overflow: 'hidden',
+  },
+  workflowBadgeDone: {
+    backgroundColor: '#e7f8ef',
+    color: '#1e704d',
+  },
+  workflowBadgeActive: {
+    backgroundColor: '#e7f1fb',
+    color: '#1f5f9f',
+  },
+  workflowBadgeIdle: {
+    backgroundColor: '#eef2f6',
+    color: '#58708a',
+  },
+  workflowStep: {
+    borderWidth: 1,
+    borderColor: "#d8e0ea",
+    borderRadius: 12,
+    padding: 10,
+    gap: 4,
+  },
+  workflowDone: {
+    backgroundColor: "#ebf7f1",
+    borderColor: "#8cc9a9",
+  },
+  workflowText: {
+    color: "#22374d",
+  },
+  noteRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e6ec",
+    paddingTop: 10,
+    gap: 4,
+  },
+  noteMeta: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#63788e",
+  },
+  noteText: {
+    color: "#22374d",
+  },
+  error: {
+    color: "#b63d3d",
+    paddingBottom: 24,
+  },
 });

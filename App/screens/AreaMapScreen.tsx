@@ -1,11 +1,18 @@
-import {View, Text} from 'react-native';
+import {View} from 'react-native';
 import React from 'react';
 import GoogleMapView from '../components/home/GoogleMapView';
 
-export default function AreaMapScreen() {
+type Props = {
+  serverUrl: string;
+  saltPct: number;
+  brinePct: number;
+  darkMode: boolean;
+};
+
+export default function AreaMapScreen({ serverUrl, saltPct, brinePct, darkMode }: Props) {
   return (
     <View style={{ flex: 1 }}>
-      <GoogleMapView />
+      <GoogleMapView serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} darkMode={darkMode} />
     </View>
   );
 }
