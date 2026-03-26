@@ -413,8 +413,8 @@ const styles = StyleSheet.create({
   },
   modeChip: {
     position: 'absolute',
-    left: 16,
-    top: 70,
+    left: 8,
+    top: 64,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',

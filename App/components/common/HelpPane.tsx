@@ -7,28 +7,33 @@ import {
   Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+
+type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 type HelpSection = {
   title: string;
   content: string[];
-  icon: string;
+  icon: IconName;
 };
 
 const helpSections: HelpSection[] = [
   {
     title: 'Quick Start',
-    icon: '✅',
+    icon: 'check-circle-outline',
     content: [
       '1. Open Area Map and tap Draw Area.',
       '2. Tap the first corner, then the opposite corner.',
       '3. Submit the area and plan the path.',
       '4. Use Controller to push waypoints and run the mission.',
+      '5. Use Manual Mode only when direct intervention is needed.',
     ],
   },
   {
     title: 'Area Map',
-    icon: '🗺️',
+    icon: 'map-marker-path',
     content: [
+      'The Area Map bottom-tab icon includes a pinpoint in the top-left of the vector icon.',
       'Drag the corner markers if the rectangle needs adjustment.',
       'Use + and - to zoom the map.',
       'Clear removes the current area so you can start over.',
@@ -37,21 +42,68 @@ const helpSections: HelpSection[] = [
   },
   {
     title: 'Controller',
-    icon: '🎮',
+    icon: 'gamepad-variant-outline',
     content: [
-      'Mission Overview shows the current mission state, coverage, and robot state.',
-      'Server Health shows whether the backend, bridge, and telemetry checks are healthy.',
-      'Use Manual Drive only when direct movement is required.',
+      'Quick Status shows mission state, coverage, robot state, and server readiness.',
+      'Mission Controls are for waypoint push and mission lifecycle commands.',
+      'Emergency controls include E-Stop and Reset.',
+      'Manual Mode can be opened from Controller when direct intervention is needed.',
       'Field Notes are for short handoff notes only.',
     ],
   },
   {
+    title: 'Mission Controls Reference',
+    icon: 'compass-outline',
+    content: [
+      'Push WP: Sends planned waypoints to the robot over LoRa.',
+      'Start: Starts mission execution using uploaded waypoints.',
+      'Pause: Temporarily pauses an active mission.',
+      'Resume: Continues a paused mission.',
+      'Complete: Marks mission as complete when work is done.',
+      'Abort: Stops mission and exits mission flow immediately.',
+      'E-Stop: Immediate emergency stop command.',
+      'Reset: Clears faulted/stopped state when allowed by backend safety rules.',
+    ],
+  },
+  {
+    title: 'Manual Mode',
+    icon: 'controller-classic-outline',
+    content: [
+      'Open Manual Mode from Controller with the Show button.',
+      'Directional controls: UP, LEFT, RIGHT, DOWN, and STOP.',
+      'Manual command switches robot control mode for direct operation.',
+      'Pause command can halt motion during manual operation.',
+      'Exit manual intervention and return to mission controls when safe.',
+    ],
+  },
+  {
+    title: 'Mission States',
+    icon: 'chart-line',
+    content: [
+      'IDLE: Ready for mission setup.',
+      'CONFIGURING: Area/path setup in progress.',
+      'RUNNING: Robot is executing mission waypoints.',
+      'PAUSED: Mission temporarily halted.',
+      'COMPLETED/ABORTED: Mission is finished.',
+    ],
+  },
+  {
     title: 'Weather',
-    icon: '❄️',
+    icon: 'weather-snowy',
     content: [
       'Use Weather to check conditions before setting final treatment percentages.',
       'The recommendation gives a quick starting point for salt and brine values.',
       'Refresh if the conditions look stale.',
+    ],
+  },
+  {
+    title: 'Troubleshooting',
+    icon: 'lightbulb-on-outline',
+    content: [
+      'If commands do not execute, verify server status is Ready in Quick Status.',
+      'If telemetry is stale, confirm robot and bridge link health before resuming mission.',
+      'If a mission action button is disabled, backend safety gates are blocking that action.',
+      'Use Field Notes to document operational issues for handoff.',
     ],
   },
 ];
@@ -96,7 +148,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
                 style={[styles.sectionHeader, { backgroundColor: theme.sectionBg, borderBottomColor: theme.border }]}
                 onPress={() => toggleSection(index)}
               >
-                <Text style={styles.sectionIcon}>{section.icon}</Text>
+                <MaterialCommunityIcons name={section.icon} size={22} color="#2c6fb7" style={styles.sectionIcon} />
                 <Text style={[styles.sectionTitle, { color: theme.title }]}>{section.title}</Text>
                 <Text style={styles.expandIcon}>
                   {expandedIndex === index ? '−' : '+'}
@@ -117,7 +169,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
 
           <View style={[styles.footer, { backgroundColor: theme.sectionBg, borderTopColor: theme.border }]}>
             <Text style={[styles.footerText, { color: theme.muted }]}> 
-              This help page now covers the core flow only: define the area, plan the path, then run and monitor the mission.
+              This guide includes extended controller documentation, including mission controls and manual mode usage.
             </Text>
           </View>
         </ScrollView>
@@ -180,7 +232,6 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e3ebf3',
   },
   sectionIcon: {
-    fontSize: 24,
     marginRight: 12,
   },
   sectionTitle: {
