@@ -33,6 +33,8 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [areaSubmitted, setAreaSubmitted] = useState(false);
   const [message, setMessage] = useState('Tap Draw Area, then choose the first corner and opposite corner.');
   const [busy, setBusy] = useState<string | null>(null);
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
     overlayBorder: '#d9e4f0',
@@ -144,6 +146,14 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setMessage('Corner adjusted. Submit area or plan path when ready.');
   };
 
+  const toggleMapType = () => {
+    setMapType((prevType) => {
+      const nextType = prevType === 'standard' ? 'satellite' : 'standard';
+      setMessage(`Map type switched to ${nextType}.`);
+      return nextType;
+    });
+  };
+
   const submitArea = async () => {
     if (!selection) {
       return;
@@ -229,6 +239,7 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         ref={mapRef}
         style={styles.map}
         provider={PROVIDER_GOOGLE}
+        mapType={mapType}
         initialRegion={{
           latitude: 41.0731,
           longitude: -81.5171,
@@ -279,7 +290,13 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+      <View style={[styles.mapTypeToggle, { top: insets.top + 70 }]}> 
+        <Pressable onPress={toggleMapType} style={styles.mapTypeAction}>
+          <Text style={styles.mapTypeActionText}>{mapType === 'standard' ? 'Satellite' : 'Standard'}</Text>
+        </Pressable>
+      </View>
+
+      <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}> 
         <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}> 
           {drawingMode ? '\u270f Drawing' : (selection ? '\u2713 Area Set' : '\u25cf Browse')}
         </Text>
@@ -405,6 +422,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
     gap: 2,
+  },
+  mapTypeToggle: {
+    position: 'absolute',
+    left: 16,
+    width: 116,
+    borderRadius: 10,
+    zIndex: 20,
+  },
+  mapTypeAction: {
+    minHeight: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#b8c5d3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f7fafc',
+    paddingHorizontal: 8,
+  },
+  mapTypeActionText: {
+    color: '#1f3550',
+    fontWeight: '700',
+    fontSize: 11,
   },
   modeChipText: {
     fontSize: 12,

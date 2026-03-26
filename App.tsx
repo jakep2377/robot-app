@@ -36,7 +36,7 @@ export default function App() {
             backgroundColor: '#f8fbff',
             borderTopColor: '#d7e2ee',
             borderTopWidth: 1,
-            height: 64,
+            height: 80,
             paddingTop: 6,
             paddingBottom: 8,
           },
