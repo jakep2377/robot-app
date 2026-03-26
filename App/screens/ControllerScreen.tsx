@@ -128,7 +128,6 @@ export default function ControllerScreen({
   const [noteText, setNoteText] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
-  const [manualModeOpen, setManualModeOpen] = useState(false);
   const refreshInFlight = useRef(false);
 
   const refresh = async () => {
@@ -309,46 +308,6 @@ export default function ControllerScreen({
           <ActionButton label="E-Stop" onPress={() => performCommand("ESTOP")} danger busy={pendingAction === "ESTOP"} />
           <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
         </View>
-      </View>
-
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <View style={styles.menuHeaderRow}>
-          <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Manual Mode</Text>
-          <Pressable style={styles.menuToggleButton} onPress={() => setManualModeOpen((current) => !current)}>
-            <Text style={styles.menuToggleButtonText}>{manualModeOpen ? "Hide" : "Show"}</Text>
-          </Pressable>
-        </View>
-
-        <Text style={[styles.metaText, { color: theme.muted }]}>Manual controls are hidden by default to reduce clutter.</Text>
-
-        {manualModeOpen ? (
-          <>
-            <View style={styles.dpad}>
-              <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
-                <Text style={styles.commandText}>UP</Text>
-              </Pressable>
-              <View style={styles.row}>
-                <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
-                  <Text style={styles.commandText}>LEFT</Text>
-                </Pressable>
-                <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
-                  <Text style={styles.commandText}>STOP</Text>
-                </Pressable>
-                <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
-                  <Text style={styles.commandText}>RIGHT</Text>
-                </Pressable>
-              </View>
-              <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
-                <Text style={styles.commandText}>DOWN</Text>
-              </Pressable>
-            </View>
-
-            <View style={styles.actionGrid}>
-              <ActionButton label="Manual" onPress={() => performCommand("MANUAL")} busy={pendingAction === "MANUAL"} />
-              <ActionButton label="Pause" onPress={() => performCommand("PAUSE")} busy={pendingAction === "PAUSE"} />
-            </View>
-          </>
-        ) : null}
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -559,51 +518,9 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
   },
-  menuHeaderRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  menuToggleButton: {
-    backgroundColor: "#16324f",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  menuToggleButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
-    fontSize: 12,
-  },
   metaText: {
     fontSize: 12,
     color: "#63788e",
-  },
-  dpad: {
-    alignItems: "center",
-    gap: 10,
-    marginTop: 6,
-  },
-  row: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  commandButton: {
-    minWidth: 88,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#2c6fb7",
-    borderRadius: 999,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
-  },
-  stopButton: {
-    backgroundColor: "#b63d3d",
-  },
-  commandText: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "700",
   },
   actionGrid: {
     flexDirection: "row",
