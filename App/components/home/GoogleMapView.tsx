@@ -427,8 +427,8 @@ const styles = StyleSheet.create({
   mapTypeToggle: {
     position: 'absolute',
     left: 16,
-    width: 120,
-    borderRadius: 14,
+    width: 116,
+    borderRadius: 10,
     zIndex: 20,
   },
   mapTypeAction: {
