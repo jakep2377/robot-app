@@ -413,7 +413,7 @@ const styles = StyleSheet.create({
   },
   modeChip: {
     position: 'absolute',
-    left: 8,
+    left: 16,
     top: 64,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
@@ -427,7 +427,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     width: 116,
-    borderRadius: 10,
+    borderRadius: 14,
     zIndex: 20,
   },
   mapTypeAction: {
