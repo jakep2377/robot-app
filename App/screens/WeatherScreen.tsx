@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, GestureResponderEvent } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type WeatherMain = {
@@ -62,19 +62,16 @@ type DispersionRecommendation = {
 const clampPct = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 
 function getWeatherIcon(condition: string): string {
-  if (!condition) return "❓";
-  const c = condition.toLowerCase();
-  if (/clear|sunny/.test(c)) return "☀️";
-  if (/cloud/.test(c)) {
-    if (/few|scattered/.test(c)) return "⛅";
-    return "☁️";
-  }
-  if (/rain|drizzle|shower/.test(c)) return "🌧️";
-  if (/thunder|storm/.test(c)) return "⛈️";
-  if (/snow|sleet/.test(c)) return "❄️";
-  if (/mist|fog/.test(c)) return "🌫️";
-  if (/wind/.test(c)) return "💨";
-  return "🌤️";
+  if (!condition) return "?";
+  const text = condition.toLowerCase();
+  if (/clear|sunny/.test(text)) return "☀";
+  if (/cloud/.test(text)) return "☁";
+  if (/rain|drizzle|shower/.test(text)) return "☂";
+  if (/thunder|storm/.test(text)) return "⚡";
+  if (/snow|sleet|ice|freezing/.test(text)) return "❄";
+  if (/mist|fog/.test(text)) return "≋";
+  if (/wind/.test(text)) return "↝";
+  return "○";
 }
 
 function calculateDewPoint(tempF: number, humidity: number): number {
@@ -91,15 +88,21 @@ function calculateFrostRisk(tempF: number, humidity: number): { riskLevel: "high
   const spreadF = tempF - dewPoint;
 
   if (tempF <= 32 && dewPoint <= 32) {
-    return { riskLevel: "high", description: "Frost likely - apply treatment" };
+    return { riskLevel: "high", description: "Frost likely" };
   }
   if (tempF <= 35 && spreadF < 3) {
-    return { riskLevel: "moderate", description: "Frost risk developing" };
+    return { riskLevel: "moderate", description: "Frost risk rising" };
   }
   if (tempF > 45 || spreadF > 8) {
-    return { riskLevel: "low", description: "Minimal frost risk" };
+    return { riskLevel: "low", description: "Low frost risk" };
   }
   return { riskLevel: "moderate", description: "Monitor conditions" };
+}
+
+function formatLocalTime(unixSeconds: number | undefined, timezoneSeconds: number | undefined) {
+  if (!unixSeconds) return "--";
+  const date = new Date((unixSeconds + (timezoneSeconds ?? 0)) * 1000);
+  return `${date.getUTCHours().toString().padStart(2, "0")}:${date.getUTCMinutes().toString().padStart(2, "0")}`;
 }
 
 export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
@@ -107,16 +110,16 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const theme = {
-    pageBg: '#f3f5f8',
-    cardBg: '#ffffff',
-    cardBorder: '#dce5ef',
-    title: '#16324f',
-    text: '#304863',
-    muted: '#63788e',
+    pageBg: "#f3f5f8",
+    cardBg: "#ffffff",
+    cardBorder: "#dce5ef",
+    title: "#16324f",
+    text: "#304863",
+    muted: "#63788e",
   };
 
-  // City and API key
   const API_KEY = "e324705094164f5dc98161647cccc83a";
   const CITY = "Akron,US";
 
@@ -148,27 +151,15 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       return null;
     }
 
-    const localTimestamp = new Date((weather.dt + (weather.timezone ?? 0)) * 1000);
-    const sunrise = weather.sys?.sunrise
-      ? new Date((weather.sys.sunrise + (weather.timezone ?? 0)) * 1000)
-      : null;
-    const sunset = weather.sys?.sunset
-      ? new Date((weather.sys.sunset + (weather.timezone ?? 0)) * 1000)
-      : null;
-
     return {
-      updatedAt: `${localTimestamp.getUTCHours().toString().padStart(2, "0")}:${localTimestamp.getUTCMinutes().toString().padStart(2, "0")}`,
-      sunrise: sunrise
-        ? `${sunrise.getUTCHours().toString().padStart(2, "0")}:${sunrise.getUTCMinutes().toString().padStart(2, "0")}`
-        : "--",
-      sunset: sunset
-        ? `${sunset.getUTCHours().toString().padStart(2, "0")}:${sunset.getUTCMinutes().toString().padStart(2, "0")}`
-        : "--",
+      updatedAt: formatLocalTime(weather.dt, weather.timezone),
+      sunrise: formatLocalTime(weather.sys?.sunrise, weather.timezone),
+      sunset: formatLocalTime(weather.sys?.sunset, weather.timezone),
       precipitationInches: Math.max(
         weather.rain?.["1h"] ?? 0,
         weather.rain?.["3h"] ?? 0,
         weather.snow?.["1h"] ?? 0,
-        weather.snow?.["3h"] ?? 0,
+        weather.snow?.["3h"] ?? 0
       ) / 25.4,
     };
   }, [weather]);
@@ -178,12 +169,14 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       return null;
     }
 
-    const conditionText = `${weather.weather?.[0]?.main ?? ''} ${weather.weather?.[0]?.description ?? ''}`.toLowerCase();
+    const conditionText = `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase();
     const isSnowOrIce = /snow|sleet|freezing|ice/.test(conditionText);
     const isRain = /rain|drizzle|shower|thunder/.test(conditionText);
     const tempF = weather.main.temp;
     const windSpeed = weather.wind?.speed ?? 0;
     const windGust = weather.wind?.gust ?? 0;
+    const humidity = weather.main.humidity;
+    const frostRisk = calculateFrostRisk(tempF, humidity);
 
     let suggestedSalt = 70;
     let suggestedBrine = 80;
@@ -202,329 +195,284 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       suggestedBrine = 100;
     }
 
-    const reasons: string[] = [`Temp ${Math.round(tempF)}°F baseline applied`];
+    const reasons: string[] = [`Base from ${Math.round(tempF)} F`];
+
+    if (
+      frostRisk.riskLevel === "low" &&
+      !isSnowOrIce &&
+      !isRain &&
+      tempF >= 38 &&
+      humidity < 85 &&
+      weatherMeta.precipitationInches < 0.02
+    ) {
+      return {
+        saltPct: 0,
+        brinePct: 0,
+        reason: "No dispersion recommended",
+      };
+    }
 
     if (isSnowOrIce) {
       suggestedSalt = Math.max(suggestedSalt, 95);
       suggestedBrine = Math.min(suggestedBrine, 60);
-      reasons.push('Snow/ice risk detected, favoring more salt');
+      reasons.push("snow or ice");
     } else if (isRain) {
       suggestedBrine = Math.max(suggestedBrine, 90);
       suggestedSalt = Math.min(suggestedSalt, 70);
-      reasons.push('Rain event detected, favoring more brine');
+      reasons.push("rain");
     }
 
     if (weatherMeta.precipitationInches >= 0.08 && tempF <= 32) {
       suggestedSalt = Math.min(100, suggestedSalt + 8);
-      reasons.push('Higher precip with freezing conditions, boosting salt rate');
+      reasons.push("higher precip");
     }
 
     if (windSpeed >= 20 || windGust >= 28) {
       suggestedSalt = Math.min(100, suggestedSalt + 5);
-      reasons.push('Strong wind detected, adding buffer to salt coverage');
+      reasons.push("strong wind");
     }
 
     return {
       saltPct: clampPct(suggestedSalt),
       brinePct: clampPct(suggestedBrine),
-      reason: reasons.join(' • '),
+      reason: reasons.join(" · "),
     };
   }, [weather, weatherMeta]);
 
-  if (loading)
+  if (loading) {
     return (
-      <ZoomableWeather>
-        <View style={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-          <ActivityIndicator size="large" />
-          <Text style={[styles.metaText, { color: theme.muted }]}>Loading weather...</Text>
-        </View>
-      </ZoomableWeather>
+      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
+        <ActivityIndicator size="large" />
+        <Text style={[styles.metaText, { color: theme.muted }]}>Loading weather...</Text>
+      </View>
     );
+  }
 
-  if (error)
+  if (error) {
     return (
-      <ZoomableWeather>
-        <View style={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-          <Text style={styles.error}>Error: {error}</Text>
-          <Pressable style={styles.refreshButton} onPress={loadWeather}>
-            <Text style={styles.refreshButtonText}>Retry</Text>
-          </Pressable>
-        </View>
-      </ZoomableWeather>
+      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
+        <Text style={styles.error}>Error: {error}</Text>
+        <Pressable style={styles.refreshButton} onPress={loadWeather}>
+          <Text style={styles.refreshButtonText}>Retry</Text>
+        </Pressable>
+      </View>
     );
+  }
 
   if (!weather || !weatherMeta) {
     return (
-      <ZoomableWeather>
-        <View style={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-          <Text style={styles.error}>Weather data is unavailable.</Text>
-        </View>
-      </ZoomableWeather>
+      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
+        <Text style={styles.error}>Weather data is unavailable.</Text>
+      </View>
     );
   }
 
   const condition = weather.weather?.[0]?.description ?? "unknown";
+  const weatherIcon = getWeatherIcon(condition);
   const windSpeed = weather.wind?.speed ?? 0;
   const windGust = weather.wind?.gust ?? 0;
   const windDirection = weather.wind?.deg ?? 0;
   const visibilityMiles = weather.visibility ? weather.visibility / 1609.34 : 0;
+  const dewPointF = calculateDewPoint(weather.main.temp, weather.main.humidity);
+  const frostRisk = calculateFrostRisk(weather.main.temp, weather.main.humidity);
   const suggestionApplied = recommendation
     ? clampPct(saltPct) === recommendation.saltPct && clampPct(brinePct) === recommendation.brinePct
     : false;
 
-  const weatherIcon = getWeatherIcon(condition);
-  const dewPointF = calculateDewPoint(weather.main.temp, weather.main.humidity);
-  const frostRisk = calculateFrostRisk(weather.main.temp, weather.main.humidity);
   const frostRiskStyle = frostRisk.riskLevel === "high"
-    ? styles.frostRisk_high
+    ? styles.frostRiskHigh
     : frostRisk.riskLevel === "moderate"
-      ? styles.frostRisk_moderate
-      : styles.frostRisk_low;
+      ? styles.frostRiskModerate
+      : styles.frostRiskLow;
+
   return (
-    <ZoomableWeather>
-      <ScrollView contentContainerStyle={[styles.scrollContent, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}>
-        <View style={[styles.headerCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-          <Text style={[styles.title, { color: theme.title, textAlign: 'center' }]}>📍 {weather.name}</Text>
-          <View style={styles.tempWithIcon}>
-            <Text style={styles.weatherIcon}>{weatherIcon}</Text>
+    <ScrollView contentContainerStyle={[styles.scrollContent, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}>
+      <View style={[styles.headerCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+        <Text style={[styles.eyebrow, { color: theme.muted }]}>Weather</Text>
+        <Text style={[styles.title, { color: theme.title }]}>{weather.name}</Text>
+        <View style={styles.heroRow}>
+          <Text style={styles.weatherIcon}>{weatherIcon}</Text>
+          <View style={styles.heroText}>
             <Text style={styles.temp}>{Math.round(weather.main.temp)}°F</Text>
+            <Text style={[styles.subtitle, { color: theme.text }]}>{condition}</Text>
           </View>
-          <Text style={[styles.subtitle, { color: theme.text, textAlign: 'center' }]}>{condition}</Text>
-          <View style={[styles.frostRiskBadge, frostRiskStyle]}>
-            <Text style={styles.frostRiskText}>
-              {frostRisk.riskLevel === 'high' ? '⚠️' : frostRisk.riskLevel === 'moderate' ? '⚡' : '✓'} {frostRisk.description}
-            </Text>
-          </View>
-          <Text style={[styles.metaText, { color: theme.muted, textAlign: 'center' }]}>Updated {weatherMeta.updatedAt} local</Text>
+        </View>
+        <View style={[styles.frostRiskBadge, frostRiskStyle]}>
+          <Text style={styles.frostRiskText}>{frostRisk.description}</Text>
+        </View>
+        <View style={styles.headerMetaRow}>
+          <Text style={[styles.metaText, { color: theme.muted }]}>Updated {weatherMeta.updatedAt}</Text>
           <Pressable style={styles.refreshButton} onPress={loadWeather}>
             <Text style={styles.refreshButtonText}>Refresh</Text>
           </Pressable>
         </View>
+      </View>
 
-        {recommendation ? (
-          <View style={[styles.recommendationCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-            <Text style={styles.recommendationTitle}>Recommended Dispersion</Text>
-            <View style={styles.recommendationRow}>
-              <View style={styles.recommendationPill}>
-                <Text style={styles.recommendationPillLabel}>Salt</Text>
-                <Text style={styles.recommendationPillValue}>{recommendation.saltPct}%</Text>
-              </View>
-              <View style={styles.recommendationPill}>
-                <Text style={styles.recommendationPillLabel}>Brine</Text>
-                <Text style={styles.recommendationPillValue}>{recommendation.brinePct}%</Text>
-              </View>
-            </View>
-            <Text style={styles.recommendationCurrent}>Current: Salt {clampPct(saltPct)}% • Brine {clampPct(brinePct)}%</Text>
-            <Text style={styles.recommendationReason}>{recommendation.reason}</Text>
-            <Pressable
-              style={[styles.applyButton, suggestionApplied ? styles.applyButtonDone : null]}
-              onPress={() => {
-                setSaltPct(recommendation.saltPct);
-                setBrinePct(recommendation.brinePct);
-              }}
-            >
-              <Text style={styles.applyButtonText}>{suggestionApplied ? 'Recommendation Applied' : 'Apply Recommendation'}</Text>
-            </Pressable>
+      {recommendation ? (
+        <View style={[styles.recommendationCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+          <Text style={styles.sectionTitle}>Recommended Mix</Text>
+          <View style={styles.recommendationRow}>
+            <ValuePill label="Salt" value={`${recommendation.saltPct}%`} />
+            <ValuePill label="Brine" value={`${recommendation.brinePct}%`} />
           </View>
-        ) : null}
-
-        <View style={styles.gridRow}>
-          <InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} />
-          <InfoCard label="Humidity" value={`${weather.main.humidity}%`} />
+          {recommendation.saltPct === 0 && recommendation.brinePct === 0 ? (
+            <Text style={styles.recommendationZero}>Conditions look clear enough to skip treatment.</Text>
+          ) : null}
+          <Text style={styles.recommendationCurrent}>Current: Salt {clampPct(saltPct)}% · Brine {clampPct(brinePct)}%</Text>
+          <Text style={styles.recommendationReason}>{recommendation.reason}</Text>
+          <Pressable
+            style={[styles.applyButton, suggestionApplied ? styles.applyButtonDone : null]}
+            onPress={() => {
+              setSaltPct(recommendation.saltPct);
+              setBrinePct(recommendation.brinePct);
+            }}
+          >
+            <Text style={styles.applyButtonText}>{suggestionApplied ? "Applied" : "Apply Recommendation"}</Text>
+          </Pressable>
         </View>
+      ) : null}
 
-        <View style={styles.gridRow}>
-          <InfoCard label="Dew Point" value={`${Math.round(dewPointF)}°F`} icon="💧" />
-          <InfoCard label="Spread" value={`${(weather.main.temp - dewPointF).toFixed(1)}°F`} icon="📏" detail="Temp vs Dew Point" />
-        </View>
+      <View style={styles.gridRow}>
+        <InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} />
+        <InfoCard label="Humidity" value={`${weather.main.humidity}%`} />
+      </View>
 
-        <View style={styles.gridRow}>
-          <InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} />
-          <InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} />
-        </View>
+      <View style={styles.gridRow}>
+        <InfoCard label="Dew Point" value={`${Math.round(dewPointF)}°F`} />
+        <InfoCard label="Spread" value={`${(weather.main.temp - dewPointF).toFixed(1)}°F`} detail="Temp vs dew point" />
+      </View>
 
+      <View style={styles.gridRow}>
+        <InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} />
+        <InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} />
+      </View>
 
-        <View style={styles.gridRow}>
-          <View style={[styles.infoCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-            <Text style={styles.infoLabel}>🌬️ Wind</Text>
-            <Text style={styles.infoValue}>{windSpeed.toFixed(1)} mph</Text>
-            <Text style={styles.infoDetail}>Dir {windDirection.toFixed(0)}° • Gust {windGust.toFixed(1)} mph</Text>
-          </View>
-          <InfoCard label="👁️ Visibility" value={`${visibilityMiles.toFixed(1)} mi`} />
-        </View>
-        <View style={styles.gridRow}>
-          <InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} />
-          <InfoCard label="Precip" value={`${weatherMeta.precipitationInches.toFixed(2)} in`} />
-        </View>
+      <View style={styles.gridRow}>
+        <InfoCard label="Wind" value={`${windSpeed.toFixed(1)} mph`} detail={`Dir ${windDirection.toFixed(0)}° · Gust ${windGust.toFixed(1)} mph`} />
+        <InfoCard label="Visibility" value={`${visibilityMiles.toFixed(1)} mi`} />
+      </View>
 
-        <View style={styles.gridRow}>
-          <InfoCard label="Sunrise" value={weatherMeta.sunrise} />
-          <InfoCard label="Sunset" value={weatherMeta.sunset} />
-        </View>
-      </ScrollView>
-    </ZoomableWeather>
+      <View style={styles.gridRow}>
+        <InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} />
+        <InfoCard label="Precip" value={`${weatherMeta.precipitationInches.toFixed(2)} in`} />
+      </View>
+
+      <View style={styles.gridRow}>
+        <InfoCard label="Sunrise" value={weatherMeta.sunrise} />
+        <InfoCard label="Sunset" value={weatherMeta.sunset} />
+      </View>
+    </ScrollView>
   );
 }
 
-function ZoomableWeather({ children }: { children: React.ReactNode }) {
-  const [scale, setScale] = useState(1);
-  const isPinchingRef = React.useRef(false);
-  const pinchStartDistanceRef = React.useRef(0);
-  const pinchStartScaleRef = React.useRef(1);
-
-  const distanceBetweenTouches = (event: GestureResponderEvent) => {
-    const touches = event.nativeEvent.touches;
-    if (touches.length < 2) return 0;
-    const first = touches[0];
-    const second = touches[1];
-    const deltaX = second.pageX - first.pageX;
-    const deltaY = second.pageY - first.pageY;
-    return Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-  };
-
-  const beginPinch = (event: GestureResponderEvent) => {
-    const startDistance = distanceBetweenTouches(event);
-    if (startDistance <= 0) return;
-    isPinchingRef.current = true;
-    pinchStartDistanceRef.current = startDistance;
-    pinchStartScaleRef.current = scale;
-  };
-
-  const updatePinch = (event: GestureResponderEvent) => {
-    if (event.nativeEvent.touches.length < 2) {
-      isPinchingRef.current = false;
-      return;
-    }
-    if (!isPinchingRef.current) {
-      beginPinch(event);
-      return;
-    }
-
-    const currentDistance = distanceBetweenTouches(event);
-    const startDistance = pinchStartDistanceRef.current;
-    if (startDistance <= 0 || currentDistance <= 0) return;
-
-    const rawScale = pinchStartScaleRef.current * (currentDistance / startDistance);
-    const clampedScale = Math.max(1, Math.min(2.5, rawScale));
-    setScale(clampedScale);
-  };
-
-  const endPinch = () => {
-    isPinchingRef.current = false;
-  };
-
+function ValuePill({ label, value }: { label: string; value: string }) {
   return (
-    <View
-      style={styles.zoomContainer}
-      onStartShouldSetResponder={(event) => event.nativeEvent.touches.length >= 2}
-      onMoveShouldSetResponder={(event) => event.nativeEvent.touches.length >= 2}
-      onResponderGrant={beginPinch}
-      onResponderMove={updatePinch}
-      onResponderRelease={endPinch}
-      onResponderTerminate={endPinch}
-    >
-      <View style={{ flex: 1, transform: [{ scale }] }}>{children}</View>
+    <View style={styles.recommendationPill}>
+      <Text style={styles.recommendationPillLabel}>{label}</Text>
+      <Text style={styles.recommendationPillValue}>{value}</Text>
     </View>
   );
 }
 
-function InfoCard({ label, value, detail, icon }: { label: string; value: string; detail?: string; icon?: string }) {
+function InfoCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
     <View style={styles.infoCard}>
-      <Text style={styles.infoLabel}>{icon ? `${icon} ${label}` : label}</Text>
+      <Text style={styles.infoLabel}>{label}</Text>
       <Text style={styles.infoValue}>{value}</Text>
       {detail ? <Text style={styles.infoDetail}>{detail}</Text> : null}
     </View>
   );
 }
+
 const styles = StyleSheet.create({
-  container: {
+  centerState: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#f3f5f8",
     padding: 20,
+    gap: 12,
   },
   scrollContent: {
     padding: 16,
     gap: 12,
-    backgroundColor: "#f3f5f8",
-  },
-  zoomContainer: {
-    flex: 1,
   },
   headerCard: {
-    backgroundColor: "#ffffff",
     borderWidth: 1,
-    borderColor: '#dce5ef',
     borderRadius: 16,
     padding: 16,
-    shadowColor: "#000",
+    shadowColor: "#000000",
     shadowOpacity: 0.07,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
     elevation: 2,
+    gap: 10,
+  },
+  eyebrow: {
+    fontSize: 12,
+    fontWeight: "700",
+    textTransform: "uppercase",
   },
   title: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "700",
-    color: "#16324f",
+  },
+  heroRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  heroText: {
+    flex: 1,
+  },
+  weatherIcon: {
+    fontSize: 44,
+    width: 52,
+    textAlign: "center",
   },
   temp: {
-    marginTop: 6,
-    fontSize: 42,
+    fontSize: 40,
     fontWeight: "700",
     color: "#2c6fb7",
   },
-  tempWithIcon: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 8,
-    gap: 8,
+  subtitle: {
+    fontSize: 16,
+    textTransform: "capitalize",
   },
-  weatherIcon: {
-    fontSize: 48,
+  headerMetaRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
   },
   frostRiskBadge: {
-    marginTop: 12,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 8,
+    borderRadius: 10,
   },
-  frostRisk_high: {
+  frostRiskHigh: {
     backgroundColor: "#ffebee",
     borderLeftWidth: 3,
     borderLeftColor: "#c62828",
   },
-  frostRisk_moderate: {
+  frostRiskModerate: {
     backgroundColor: "#fff3e0",
     borderLeftWidth: 3,
     borderLeftColor: "#f57c00",
   },
-  frostRisk_low: {
+  frostRiskLow: {
     backgroundColor: "#e8f5e9",
     borderLeftWidth: 3,
     borderLeftColor: "#2e7d32",
   },
   frostRiskText: {
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "700",
     color: "#1f3550",
   },
-  subtitle: {
-    marginTop: 4,
-    fontSize: 16,
-    color: "#304863",
-    textTransform: "capitalize",
-  },
   metaText: {
-    marginTop: 4,
-    color: "#63788e",
     fontSize: 12,
   },
   refreshButton: {
-    marginTop: 12,
-    alignSelf: "flex-start",
     backgroundColor: "#16324f",
     borderRadius: 10,
     paddingHorizontal: 14,
@@ -534,19 +482,15 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontWeight: "700",
   },
-  gridRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
   recommendationCard: {
     backgroundColor: "#ffffff",
     borderWidth: 1,
-    borderColor: '#dce5ef',
+    borderColor: "#dce5ef",
     borderRadius: 14,
     padding: 14,
-    gap: 8,
+    gap: 10,
   },
-  recommendationTitle: {
+  sectionTitle: {
     fontSize: 17,
     fontWeight: "700",
     color: "#1f3550",
@@ -579,6 +523,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
+  recommendationZero: {
+    color: "#1e6d4f",
+    fontSize: 12,
+    fontWeight: "700",
+  },
   recommendationReason: {
     color: "#4f6478",
     fontSize: 12,
@@ -591,7 +540,6 @@ const styles = StyleSheet.create({
     borderLeftColor: "#2c6fb7",
   },
   applyButton: {
-    marginTop: 4,
     borderRadius: 10,
     backgroundColor: "#1e6d4f",
     minHeight: 40,
@@ -605,11 +553,15 @@ const styles = StyleSheet.create({
     color: "#ffffff",
     fontWeight: "700",
   },
+  gridRow: {
+    flexDirection: "row",
+    gap: 12,
+  },
   infoCard: {
     flex: 1,
     backgroundColor: "#ffffff",
     borderWidth: 1,
-    borderColor: '#dce5ef',
+    borderColor: "#dce5ef",
     borderRadius: 14,
     padding: 14,
     gap: 4,

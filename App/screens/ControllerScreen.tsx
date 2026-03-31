@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -128,6 +129,7 @@ export default function ControllerScreen({
   const [noteText, setNoteText] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
+  const [manualControlVisible, setManualControlVisible] = useState(false);
   const refreshInFlight = useRef(false);
 
   const refresh = async () => {
@@ -308,6 +310,12 @@ export default function ControllerScreen({
           <ActionButton label="E-Stop" onPress={() => performCommand("ESTOP")} danger busy={pendingAction === "ESTOP"} />
           <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
         </View>
+
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Override</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Open when you need direct drive.</Text>
+        <Pressable style={styles.manualLauncher} onPress={() => setManualControlVisible(true)}>
+          <Text style={styles.manualLauncherText}>Open Manual Control</Text>
+        </Pressable>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -325,7 +333,7 @@ export default function ControllerScreen({
           onChange={setBrinePct}
           accentColor="#2c6fb7"
         />
-        <Text style={[styles.metaText, { color: theme.muted }]}>Used when planning path waypoints from the map.</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Used for map planning.</Text>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -336,18 +344,18 @@ export default function ControllerScreen({
             <Text style={styles.alertMessage}>{latestAlert.message}</Text>
           </View>
         ) : (
-          <Text style={[styles.metaText, { color: theme.muted }]}>No active alerts.</Text>
+          <Text style={[styles.metaText, { color: theme.muted }]}>No alerts.</Text>
         )}
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Field Notes</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Keep short notes for handoff, recovery, or anything the next operator should know.</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for handoff.</Text>
         <TextInput
           style={[styles.input, styles.noteInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
           value={noteText}
           onChangeText={setNoteText}
-          placeholder="Add a short field note"
+          placeholder="Add a note"
           placeholderTextColor={theme.muted}
           multiline
         />
@@ -362,11 +370,54 @@ export default function ControllerScreen({
             </View>
           ))
         ) : (
-          <Text style={[styles.metaText, { color: theme.muted }]}>No notes yet.</Text>
+          <Text style={[styles.metaText, { color: theme.muted }]}>No notes.</Text>
         )}
       </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
+
+      <Modal
+        visible={manualControlVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setManualControlVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderText}>
+                <Text style={styles.modalTitle}>Manual Control</Text>
+                <Text style={styles.modalSubtitle}>Direct drive controls.</Text>
+              </View>
+              <Pressable style={styles.modalCloseButton} onPress={() => setManualControlVisible(false)}>
+                <Text style={styles.modalCloseButtonText}>Close</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalStatusText}>Mission {missionState} · Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} · Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
+
+            <View style={styles.dpad}>
+              <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
+                <Text style={styles.commandText}>{pendingAction === "FORWARD" ? "FWD..." : "FWD"}</Text>
+              </Pressable>
+              <View style={styles.row}>
+                <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
+                  <Text style={styles.commandText}>{pendingAction === "LEFT" ? "LEFT..." : "LEFT"}</Text>
+                </Pressable>
+                <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
+                  <Text style={styles.commandText}>{pendingAction === "STOP" ? "STOP..." : "STOP"}</Text>
+                </Pressable>
+                <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
+                  <Text style={styles.commandText}>{pendingAction === "RIGHT" ? "RIGHT..." : "RIGHT"}</Text>
+                </Pressable>
+              </View>
+              <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
+                <Text style={styles.commandText}>{pendingAction === "BACKWARD" ? "BACK..." : "BACK"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -522,6 +573,32 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#63788e",
   },
+  dpad: {
+    alignItems: "center",
+    gap: 10,
+    marginTop: 6,
+  },
+  row: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  commandButton: {
+    minWidth: 88,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#2c6fb7",
+    borderRadius: 999,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+  },
+  stopButton: {
+    backgroundColor: "#b63d3d",
+  },
+  commandText: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
   actionGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -544,6 +621,67 @@ const styles = StyleSheet.create({
   actionText: {
     color: "#ffffff",
     fontWeight: "700",
+  },
+  manualLauncher: {
+    alignSelf: "flex-start",
+    backgroundColor: "#2c6fb7",
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  manualLauncherText: {
+    color: "#ffffff",
+    fontWeight: "700",
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(19, 35, 58, 0.62)",
+    justifyContent: "center",
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 20,
+    padding: 18,
+    gap: 14,
+    shadowColor: "#000000",
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  modalHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#13233a",
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    color: "#63788e",
+  },
+  modalCloseButton: {
+    backgroundColor: "#e8eef5",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  modalCloseButtonText: {
+    color: "#16324f",
+    fontWeight: "700",
+  },
+  modalStatusText: {
+    fontSize: 12,
+    color: "#63788e",
   },
   alertRow: {
     borderRadius: 12,
