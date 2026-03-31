@@ -608,6 +608,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     top: 64,
+    width: 120,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
@@ -619,8 +620,8 @@ const styles = StyleSheet.create({
   mapTypeToggle: {
     position: 'absolute',
     left: 16,
-    width: 116,
-    borderRadius: 14,
+    width: 120,
+    borderRadius: 10,
     zIndex: 20,
   },
   mapTypeAction: {
