@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { Button, Pressable, StyleSheet, Text, View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -38,7 +39,14 @@ type CoverageResponse = {
     width: number;
     height: number;
     cellSizeM: number;
-    cells: CoverageCell[];
+    cells: Array<{
+      row: number;
+      col: number;
+      covered: boolean;
+      hits: number;
+      lastSeenMs: number;
+      polygon: Array<{ lat: number; lon: number }>;
+    }>;
   };
 };
 
@@ -48,7 +56,7 @@ type Props = {
   brinePct: number;
 };
 
-function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
+export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
   const [drawingMode, setDrawingMode] = useState(false);
@@ -60,7 +68,7 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [areaSubmitted, setAreaSubmitted] = useState(false);
   const [message, setMessage] = useState('Tap Draw Area, then pick two corners.');
   const [busy, setBusy] = useState<string | null>(null);
-  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+  const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
 
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
@@ -82,7 +90,6 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const lat2 = b.latitude * (Math.PI / 180);
     const dLat = (b.latitude - a.latitude) * (Math.PI / 180);
     const dLon = (b.longitude - a.longitude) * (Math.PI / 180);
-
     const sinLat = Math.sin(dLat / 2);
     const sinLon = Math.sin(dLon / 2);
     const aCalc = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
@@ -100,22 +107,14 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const getSelectionMetrics = () => {
-    if (!selection) {
-      return { widthM: 0, heightM: 0, areaM2: 0 };
-    }
-
+    if (!selection) return { widthM: 0, heightM: 0, areaM2: 0 };
     const widthA = haversineDistanceMeters(selection.boundary[0], selection.boundary[1]);
     const widthB = haversineDistanceMeters(selection.boundary[2], selection.boundary[3]);
     const heightA = haversineDistanceMeters(selection.boundary[1], selection.boundary[2]);
     const heightB = haversineDistanceMeters(selection.boundary[3], selection.boundary[0]);
     const widthM = (widthA + widthB) / 2;
     const heightM = (heightA + heightB) / 2;
-
-    return {
-      widthM,
-      heightM,
-      areaM2: widthM * heightM,
-    };
+    return { widthM, heightM, areaM2: widthM * heightM };
   };
 
   const buildPathArrowPoints = (points: PlannedCoordinate[]) => {
@@ -123,38 +122,24 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const headingToleranceDeg = 12;
     const { areaM2 } = getSelectionMetrics();
     const minSegmentLengthM = areaM2 > 4000 ? 20 : areaM2 > 1600 ? 14 : 8;
-
     let segmentStart = 0;
 
     const flushSegment = (startIndex: number, endIndex: number) => {
-      if (endIndex <= startIndex) {
-        return;
-      }
-
+      if (endIndex <= startIndex) return;
       let segmentLengthM = 0;
       for (let i = startIndex + 1; i <= endIndex; i++) {
         segmentLengthM += haversineDistanceMeters(points[i - 1], points[i]);
       }
-
-      if (segmentLengthM < minSegmentLengthM) {
-        return;
-      }
-
+      if (segmentLengthM < minSegmentLengthM) return;
       const midpointIndex = Math.floor((startIndex + endIndex) / 2);
       const midpoint = points[midpointIndex];
-      if (typeof midpoint.headingDeg === 'number') {
-        arrows.push(midpoint);
-      }
+      if (typeof midpoint.headingDeg === 'number') arrows.push(midpoint);
     };
 
     for (let i = 1; i < points.length; i++) {
       const previousHeading = typeof points[i - 1].headingDeg === 'number' ? points[i - 1].headingDeg : null;
       const currentHeading = typeof points[i].headingDeg === 'number' ? points[i].headingDeg : previousHeading;
-
-      if (previousHeading == null || currentHeading == null) {
-        continue;
-      }
-
+      if (previousHeading == null || currentHeading == null) continue;
       const headingDelta = Math.abs((((currentHeading - previousHeading) + 540) % 360) - 180);
       if (headingDelta > headingToleranceDeg) {
         flushSegment(segmentStart, i - 1);
@@ -174,39 +159,24 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const orderBoundaryPoints = (base: LatLng, goal: LatLng, sideA: LatLng, sideB: LatLng): LatLng[] => {
     const crossA = diagonalCross(base, goal, sideA);
     const crossB = diagonalCross(base, goal, sideB);
-
-    if (crossA === 0 && crossB === 0) {
-      return [base, sideA, goal, sideB];
-    }
-
-    if (crossA * crossB < 0) {
-      return crossA > 0
-        ? [base, sideA, goal, sideB]
-        : [base, sideB, goal, sideA];
-    }
-
+    if (crossA === 0 && crossB === 0) return [base, sideA, goal, sideB];
+    if (crossA * crossB < 0) return crossA > 0 ? [base, sideA, goal, sideB] : [base, sideB, goal, sideA];
     return [base, sideA, goal, sideB];
   };
 
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
-    setSelection({
-      boundary,
-      baseStation: boundary[0],
-      goal: boundary[2],
-    });
+    setSelection({ boundary, baseStation: boundary[0], goal: boundary[2] });
     resetPlanningState();
   };
 
   const applyCorner = (corner: LatLng) => {
     if (!drawingMode) return;
-
     if (!firstPoint) {
       setFirstPoint(corner);
       setMessage('First corner set. Pick the opposite corner.');
       return;
     }
-
     const secondPoint = corner;
     const boundary = orderBoundaryPoints(
       firstPoint,
@@ -214,19 +184,12 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       { latitude: firstPoint.latitude, longitude: secondPoint.longitude },
       { latitude: secondPoint.latitude, longitude: firstPoint.longitude },
     );
-
-    const nextSelection = {
-      baseStation: firstPoint,
-      goal: secondPoint,
-      boundary,
-    };
-
+    const nextSelection = { baseStation: firstPoint, goal: secondPoint, boundary };
     setSelection(nextSelection);
     resetPlanningState();
     setMessage('Area set. Submit it, then plan the path.');
     setDrawingMode(false);
     setFirstPoint(null);
-
     requestAnimationFrame(() => {
       mapRef.current?.fitToCoordinates(nextSelection.boundary, {
         edgePadding: { top: 80, right: 80, bottom: 80, left: 80 },
@@ -255,21 +218,19 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const moveBoundaryCorner = (index: number, nextCoordinate: LatLng) => {
     if (!selection) return;
-
     const currentBoundary = selection.boundary;
     const baseCorner = index === 0 ? nextCoordinate : currentBoundary[0];
     const goalCorner = index === 2 ? nextCoordinate : currentBoundary[2];
     const sideCornerA = index === 1 ? nextCoordinate : currentBoundary[1];
     const sideCornerB = index === 3 ? nextCoordinate : currentBoundary[3];
-
     updateSelectionFromBoundary(orderBoundaryPoints(baseCorner, goalCorner, sideCornerA, sideCornerB));
     setMessage('Corner updated.');
   };
 
   const toggleMapType = () => {
     setMapType((prevType) => {
-      const nextType = prevType === 'standard' ? 'satellite' : 'standard';
-      setMessage(nextType === 'satellite' ? 'Satellite view.' : 'Standard view.');
+      const nextType = prevType === 'standard' ? 'hybrid' : 'standard';
+      setMessage(nextType === 'hybrid' ? 'Satellite view.' : 'Standard view.');
       return nextType;
     });
   };
@@ -277,7 +238,15 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const loadCoverageGrid = async () => {
     try {
       const response = await getJson<CoverageResponse>(serverUrl, '/api/coverage');
-      setCoverageCells(response.grid?.cells ?? []);
+      setCoverageCells(
+        (response.grid?.cells ?? []).map((cell) => ({
+          ...cell,
+          polygon: (cell.polygon ?? []).map((point) => ({
+            latitude: point.lat,
+            longitude: point.lon,
+          })),
+        })),
+      );
       return true;
     } catch {
       setCoverageCells([]);
@@ -286,28 +255,17 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const submitArea = async () => {
-    if (!selection) {
-      return;
-    }
-
+    if (!selection) return;
     setBusy('area');
     try {
       await postJson(serverUrl, '/api/input-area', {
-        baseStation: {
-          lat: selection.baseStation.latitude,
-          lon: selection.baseStation.longitude,
-        },
-        boundary: selection.boundary.map((point) => ({
-          lat: point.latitude,
-          lon: point.longitude,
-        })),
+        baseStation: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
+        boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
         cellSizeM: 2,
       });
       setAreaSubmitted(true);
       const gridLoaded = await loadCoverageGrid();
-      setMessage(gridLoaded
-        ? 'Area submitted. You can plan the path now.'
-        : 'Area submitted. Grid preview is unavailable right now.');
+      setMessage(gridLoaded ? 'Area submitted. You can plan the path now.' : 'Area submitted. Grid preview is unavailable right now.');
     } catch (requestError) {
       setMessage(requestError instanceof Error ? requestError.message : 'Area submit failed.');
     } finally {
@@ -316,41 +274,30 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const planPath = async () => {
-    if (!selection) {
-      return;
-    }
+    if (!selection) return;
     if (!areaSubmitted) {
       setMessage('Submit the area first.');
       return;
     }
-
     setBusy('path');
     try {
       const result = await postJson<{ ok: boolean; points: PlannedPoint[] }>(serverUrl, '/api/path/plan', {
         mode: 'coverage',
-        start: {
-          lat: selection.baseStation.latitude,
-          lon: selection.baseStation.longitude,
-        },
-        goal: {
-          lat: selection.goal.latitude,
-          lon: selection.goal.longitude,
-        },
+        start: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
+        goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
         coverageWidthM: 0.5,
         saltPct,
         brinePct,
       });
-
       const points = (result?.points ?? []).map((point) => ({
         latitude: point.lat,
         longitude: point.lon,
         headingDeg: point.headingDeg ?? null,
       }));
-
       setPlannedPath(points);
-      setPlannedPathDistanceM(computePathDistanceMeters(points));
+      const totalDistance = computePathDistanceMeters(points);
+      setPlannedPathDistanceM(totalDistance);
       await loadCoverageGrid();
-
       if (points.length > 1) {
         requestAnimationFrame(() => {
           mapRef.current?.fitToCoordinates(points.map((point) => ({
@@ -362,11 +309,10 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           });
         });
       }
-
       if (saltPct === 0 && brinePct === 0) {
-        setMessage(`Path ready, but warning: 0% salt and 0% brine cannot be started.`);
+        setMessage('Path ready, but warning: 0% salt and 0% brine cannot be started.');
       } else {
-        setMessage(`Path ready: ${points.length} points, ${(computePathDistanceMeters(points) / 1000).toFixed(2)} km.`);
+        setMessage(`Path ready: ${points.length} points, ${(totalDistance / 1000).toFixed(2)} km.`);
       }
     } catch (requestError) {
       setPlannedPath([]);
@@ -383,98 +329,94 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   return (
     <View style={styles.container}>
-      <MapView
-        ref={mapRef}
-        style={styles.map}
-        provider={PROVIDER_GOOGLE}
-        mapType={mapType}
-        showsPointsOfInterests={false}
-        toolbarEnabled={false}
-        initialRegion={{
-          latitude: 41.0731,
-          longitude: -81.5171,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        }}
-        maxZoomLevel={22}
-        minZoomLevel={2}
-        onPress={handleMapPress}
-        zoomEnabled
-        scrollEnabled
-        rotateEnabled={false}
-        pitchEnabled={false}
-      >
-        {selection ? (
-          <>
-            {coverageCells.map((cell) => (
+      <View style={styles.mapFrame}>
+        <MapView
+          ref={mapRef}
+          style={styles.map}
+          provider={PROVIDER_GOOGLE}
+          mapType={mapType}
+          showsPointsOfInterests={false}
+          toolbarEnabled={false}
+          initialRegion={{
+            latitude: 41.0731,
+            longitude: -81.5171,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          }}
+          maxZoomLevel={22}
+          minZoomLevel={2}
+          onPress={handleMapPress}
+          zoomEnabled
+          scrollEnabled
+          rotateEnabled={false}
+          pitchEnabled={false}
+        >
+          {selection ? (
+            <>
+              {coverageCells.map((cell) => (
+                <Polygon
+                  key={`grid-${cell.row}-${cell.col}`}
+                  coordinates={cell.polygon}
+                  strokeColor={cell.covered ? 'rgba(45,138,101,0.30)' : 'rgba(31,95,159,0.24)'}
+                  fillColor="transparent"
+                  strokeWidth={1}
+                />
+              ))}
               <Polygon
-                key={`grid-${cell.row}-${cell.col}`}
-                coordinates={cell.polygon}
-                strokeColor={cell.covered ? 'rgba(45,138,101,0.30)' : 'rgba(31,95,159,0.24)'}
-                fillColor="transparent"
-                strokeWidth={1}
+                coordinates={selection.boundary}
+                strokeColor="#2c6fb7"
+                fillColor="rgba(44,111,183,0.12)"
+                strokeWidth={2}
               />
-            ))}
-            <Polygon
-              coordinates={selection.boundary}
-              strokeColor="#2c6fb7"
-              fillColor="rgba(44,111,183,0.12)"
-              strokeWidth={2}
-            />
-            {selection.boundary.map((point, index) => (
-              <Marker
-                key={`corner-${index}`}
-                coordinate={point}
-                draggable
-                pinColor={index === 0 ? '#2d8a65' : index === 2 ? '#b63d3d' : '#2c6fb7'}
-                title={index === 0 ? 'Base Corner' : index === 2 ? 'Goal Corner' : 'Boundary Corner'}
-                onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
-              />
-            ))}
-            {plannedPath.length > 1 ? (
-              <>
-                <Polyline
-                  coordinates={plannedPath.map((point) => ({
-                    latitude: point.latitude,
-                    longitude: point.longitude,
-                  }))}
-                  strokeColor="#ffffff"
-                  strokeWidth={8}
-                  geodesic
+              {selection.boundary.map((point, index) => (
+                <Marker
+                  key={`corner-${index}`}
+                  coordinate={point}
+                  draggable
+                  pinColor={index === 0 ? '#2d8a65' : index === 2 ? '#b63d3d' : '#2c6fb7'}
+                  title={index === 0 ? 'Base Corner' : index === 2 ? 'Goal Corner' : 'Boundary Corner'}
+                  onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
                 />
-                <Polyline
-                  coordinates={plannedPath.map((point) => ({
-                    latitude: point.latitude,
-                    longitude: point.longitude,
-                  }))}
-                  strokeColor="#1f5f9f"
-                  strokeWidth={4}
-                  geodesic
-                />
-                {pathArrowPoints.map((point, index) => (
-                  <Marker
-                    key={`path-arrow-${index}`}
-                    coordinate={point}
-                    anchor={{ x: 0.5, y: 0.5 }}
-                    flat
-                    tracksViewChanges={false}
-                  >
-                    <View
-                      style={[
-                        styles.pathArrow,
-                        { width: arrowSize, height: arrowSize },
-                        { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
-                      ]}
+              ))}
+              {plannedPath.length > 1 ? (
+                <>
+                  <Polyline
+                    coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
+                    strokeColor="#ffffff"
+                    strokeWidth={8}
+                    geodesic
+                  />
+                  <Polyline
+                    coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
+                    strokeColor="#1f5f9f"
+                    strokeWidth={4}
+                    geodesic
+                  />
+                  {pathArrowPoints.map((point, index) => (
+                    <Marker
+                      key={`path-arrow-${index}`}
+                      coordinate={point}
+                      anchor={{ x: 0.5, y: 0.5 }}
+                      flat
+                      tracksViewChanges={false}
                     >
-                      <Text style={[styles.pathArrowText, { fontSize: Math.max(12, arrowSize - 4), lineHeight: Math.max(12, arrowSize - 4) }]}>▲</Text>
-                    </View>
-                  </Marker>
-                ))}
-              </>
-            ) : null}
-          </>
-        ) : null}
-      </MapView>
+                      <View
+                        style={[
+                          styles.pathArrow,
+                          { width: arrowSize, height: arrowSize },
+                          { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
+                        ]}
+                      >
+                        <Text style={[styles.pathArrowText, { fontSize: Math.max(12, arrowSize - 4), lineHeight: Math.max(12, arrowSize - 4) }]}>▲</Text>
+                      </View>
+                    </Marker>
+                  ))}
+                </>
+              ) : null}
+            </>
+          ) : null}
+        </MapView>
+      </View>
 
       <View style={[styles.zoomStack, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
         <Button title="+" onPress={() => zoomBy(1)} />
@@ -483,26 +425,39 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View style={[styles.mapTypeToggle, { top: insets.top + 70 }]}>
-        <Pressable onPress={toggleMapType} style={styles.mapTypeAction}>
-          <Text style={styles.mapTypeActionText}>{mapType === 'standard' ? 'Satellite' : 'Standard'}</Text>
-        </Pressable>
-      </View>
-
       <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
-        <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}>
-          {drawingMode ? 'Drawing' : (selection ? 'Area Set' : 'Browse')}
-        </Text>
-        <Text style={[styles.modeChipSub, { color: theme.muted }]}>
-          Salt {saltPct}% · Brine {brinePct}%
-        </Text>
+        <View style={styles.modeChipTextBlock}>
+          <View style={styles.modeChipRow}>
+            <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}>
+              {drawingMode ? 'Drawing' : (selection ? 'Area Set' : 'Browse')}
+            </Text>
+            <MaterialCommunityIcons
+              name={drawingMode ? 'vector-polyline-edit' : selection ? 'selection-drag' : 'map-search-outline'}
+              size={16}
+              color="#2c6fb7"
+            />
+          </View>
+          <Text style={[styles.modeChipSub, { color: theme.muted }]} numberOfLines={1}>
+            Salt {saltPct}% · Brine {brinePct}%
+          </Text>
+        </View>
+        <Pressable onPress={toggleMapType} style={styles.mapTypeAction}>
+          <View style={styles.modeChipRow}>
+            <Text style={styles.mapTypeActionText}>{mapType === 'standard' ? 'Satellite' : 'Standard'}</Text>
+            <MaterialCommunityIcons
+              name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
+              size={16}
+              color="#2c6fb7"
+            />
+          </View>
+        </Pressable>
       </View>
 
       <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
         <Text style={[styles.overlayText, { color: theme.text }]}>{message}</Text>
         <Text style={styles.stepText}>Draw area · Submit area · Plan path</Text>
         {plannedPath.length > 1 ? (
-          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points · {(plannedPathDistanceM / 1000).toFixed(2)} km · Grid {Math.round(widthM)}m × {Math.round(heightM)}m</Text>
+          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points · {(plannedPathDistanceM / 1000).toFixed(2)} km · Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
         ) : null}
         <View style={styles.actionRow}>
           <Pressable
@@ -538,19 +493,11 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             style={[
               styles.statefulButton,
               styles.actionFill,
-              !selection || busy !== null
-                ? styles.buttonDisabled
-                : areaSubmitted
-                  ? styles.buttonDone
-                  : styles.buttonReady,
+              !selection || busy !== null ? styles.buttonDisabled : areaSubmitted ? styles.buttonDone : styles.buttonReady,
             ]}
           >
             <Text style={styles.statefulButtonText}>
-              {busy === 'area'
-                ? 'Submitting Area...'
-                : areaSubmitted
-                  ? 'Area Submitted'
-                  : 'Submit Area'}
+              {busy === 'area' ? 'Submitting Area...' : areaSubmitted ? 'Area Submitted' : 'Submit Area'}
             </Text>
           </Pressable>
           <Pressable
@@ -559,9 +506,7 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             style={[
               styles.statefulButton,
               styles.actionFill,
-              !selection || !areaSubmitted || busy !== null
-                ? styles.buttonDisabled
-                : styles.buttonPlan,
+              !selection || !areaSubmitted || busy !== null ? styles.buttonDisabled : styles.buttonPlan,
             ]}
           >
             <Text style={styles.statefulButtonText}>
@@ -574,10 +519,12 @@ function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   );
 }
 
-export default GoogleMapView;
-
 const styles = StyleSheet.create({
   container: {
+    flex: 1,
+    backgroundColor: '#f3f5f8',
+  },
+  mapFrame: {
     flex: 1,
   },
   map: {
@@ -608,36 +555,38 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     top: 64,
-    width: 120,
+    width: 176,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 12,
-    paddingVertical: 7,
-    gap: 2,
+    paddingVertical: 10,
+    gap: 8,
   },
-  mapTypeToggle: {
-    position: 'absolute',
-    left: 16,
-    width: 120,
-    borderRadius: 10,
-    zIndex: 20,
+  modeChipTextBlock: {
+    gap: 3,
+  },
+  modeChipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   mapTypeAction: {
-    minHeight: 34,
-    borderRadius: 8,
+    minHeight: 40,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#b8c5d3',
+    borderColor: '#d9e4f0',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#f7fafc',
-    paddingHorizontal: 8,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    paddingHorizontal: 10,
+    minWidth: 0,
   },
   mapTypeActionText: {
-    color: '#1f3550',
+    color: '#35506a',
     fontWeight: '700',
-    fontSize: 11,
+    fontSize: 12,
   },
   modeChipText: {
     fontSize: 12,
@@ -645,7 +594,7 @@ const styles = StyleSheet.create({
     color: '#35506a',
   },
   modeChipSub: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
     color: '#6a87a2',
   },

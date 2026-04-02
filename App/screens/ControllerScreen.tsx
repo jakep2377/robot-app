@@ -273,7 +273,7 @@ export default function ControllerScreen({
       <Text style={[styles.title, { color: theme.title }]}>Robot Controller</Text>
       <View style={styles.statusRow}>
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
-          <Text style={styles.statusPillText}>{socketState === 'live' ? '● Live' : '◌ Polling'}</Text>
+          <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
         </View>
         <View style={[styles.statusPill, styles.statusPillMission]}>
           <Text style={styles.statusPillText}>{missionState}</Text>
@@ -291,18 +291,18 @@ export default function ControllerScreen({
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot</Text><Text style={[styles.quickValue, { color: theme.text }]}>{summary?.robot?.state ?? status?.state ?? "UNKNOWN"}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Server</Text><Text style={[styles.quickValue, { color: theme.text }]}>{health?.ready ? "Ready" : "Not Ready"}</Text></View>
         </View>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Telemetry {health?.checks?.telemetry ? "OK" : "Stale"} · Bridge {health?.checks?.bridge ? "OK" : "Issue"} · Queue {status?.queue_depth ?? 0}</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Telemetry {health?.checks?.telemetry ? "OK" : "Stale"} | Bridge {health?.checks?.bridge ? "OK" : "Issue"} | Queue {status?.queue_depth ?? 0}</Text>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
-        <View style={styles.actionGrid}>
-          <ActionButton label="Push WP" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} />
-          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} />
-          <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} />
-          <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} />
-          <ActionButton label="Complete" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} />
-          <ActionButton label="Abort" onPress={() => performAction("mission-abort")} disabled={!allowedAction("mission-abort")?.enabled} busy={pendingAction === "mission-abort"} danger />
+        <View style={styles.missionActionGrid}>
+          <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
+          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
+          <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} compact />
+          <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} compact />
+          <ActionButton label="Finish" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} compact />
+          <ActionButton label="Abort" onPress={() => performAction("mission-abort")} disabled={!allowedAction("mission-abort")?.enabled} busy={pendingAction === "mission-abort"} danger compact />
         </View>
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Emergency</Text>
@@ -312,7 +312,6 @@ export default function ControllerScreen({
         </View>
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Override</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Open when you need direct drive.</Text>
         <Pressable style={styles.manualLauncher} onPress={() => setManualControlVisible(true)}>
           <Text style={styles.manualLauncherText}>Open Manual Control</Text>
         </Pressable>
@@ -333,7 +332,6 @@ export default function ControllerScreen({
           onChange={setBrinePct}
           accentColor="#2c6fb7"
         />
-        <Text style={[styles.metaText, { color: theme.muted }]}>Used for map planning.</Text>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -394,7 +392,7 @@ export default function ControllerScreen({
               </Pressable>
             </View>
 
-            <Text style={styles.modalStatusText}>Mission {missionState} · Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} · Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
+            <Text style={styles.modalStatusText}>Mission {missionState} | Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} | Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
 
             <View style={styles.dpad}>
               <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
@@ -428,12 +426,14 @@ function ActionButton({
   disabled,
   busy,
   danger,
+  compact,
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
   busy?: boolean;
   danger?: boolean;
+  compact?: boolean;
 }) {
   return (
     <Pressable
@@ -441,6 +441,7 @@ function ActionButton({
       disabled={disabled || busy}
       style={[
         styles.actionButton,
+        compact ? styles.missionActionGridButton : null,
         danger ? styles.actionDanger : null,
         disabled || busy ? styles.actionDisabled : null,
       ]}
@@ -472,13 +473,18 @@ const styles = StyleSheet.create({
   },
   statusPill: {
     borderRadius: 999,
-    paddingHorizontal: 10,
+    minHeight: 30,
+    minWidth: 92,
+    paddingHorizontal: 12,
     paddingVertical: 4,
+    alignItems: "center",
+    justifyContent: "center",
   },
   statusPillText: {
     fontSize: 11,
     fontWeight: '700',
     color: '#ffffff',
+    textAlign: "center",
   },
   statusPillLive: {
     backgroundColor: '#1a9a5b',
@@ -583,13 +589,13 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   commandButton: {
-    minWidth: 88,
+    minWidth: 96,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#2c6fb7",
     borderRadius: 999,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
+    paddingHorizontal: 22,
+    paddingVertical: 20,
   },
   stopButton: {
     backgroundColor: "#b63d3d",
@@ -602,15 +608,27 @@ const styles = StyleSheet.create({
   actionGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
+    gap: 8,
+    justifyContent: "space-between",
+  },
+  missionActionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    justifyContent: "space-between",
   },
   actionButton: {
-    minWidth: 96,
+    width: "48%",
     backgroundColor: "#2d8a65",
     borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     alignItems: "center",
+    justifyContent: "center",
+  },
+  missionActionGridButton: {
+    width: "31.5%",
   },
   actionDanger: {
     backgroundColor: "#b63d3d",
@@ -682,6 +700,7 @@ const styles = StyleSheet.create({
   modalStatusText: {
     fontSize: 12,
     color: "#63788e",
+    flexWrap: "wrap",
   },
   alertRow: {
     borderRadius: 12,

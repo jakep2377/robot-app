@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type WeatherMain = {
@@ -110,6 +110,8 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
+  const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
 
   const theme = {
     pageBg: "#f3f5f8",
@@ -145,6 +147,14 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   useEffect(() => {
     loadWeather();
   }, []);
+
+  useEffect(() => {
+    setManualSaltText(String(clampPct(saltPct)));
+  }, [saltPct]);
+
+  useEffect(() => {
+    setManualBrineText(String(clampPct(brinePct)));
+  }, [brinePct]);
 
   const weatherMeta = useMemo(() => {
     if (!weather) {
@@ -278,6 +288,8 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const suggestionApplied = recommendation
     ? clampPct(saltPct) === recommendation.saltPct && clampPct(brinePct) === recommendation.brinePct
     : false;
+  const manualSaltValue = clampPct(Number.parseInt(manualSaltText || "0", 10) || 0);
+  const manualBrineValue = clampPct(Number.parseInt(manualBrineText || "0", 10) || 0);
 
   const frostRiskStyle = frostRisk.riskLevel === "high"
     ? styles.frostRiskHigh
@@ -319,6 +331,44 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
             <Text style={styles.recommendationZero}>Conditions look clear enough to skip treatment.</Text>
           ) : null}
           <Text style={styles.recommendationCurrent}>Current: Salt {clampPct(saltPct)}% · Brine {clampPct(brinePct)}%</Text>
+          <View style={styles.manualMixBlock}>
+            <Text style={styles.manualMixLabel}>Manual Entry</Text>
+            <View style={styles.manualMixRow}>
+              <View style={styles.manualMixField}>
+                <Text style={styles.manualMixFieldLabel}>Salt</Text>
+                <TextInput
+                  style={styles.manualMixInput}
+                  value={manualSaltText}
+                  onChangeText={(text) => setManualSaltText(text.replace(/[^0-9]/g, "").slice(0, 3))}
+                  keyboardType="number-pad"
+                  maxLength={3}
+                  placeholder="0"
+                  placeholderTextColor="#8aa0b6"
+                />
+              </View>
+              <View style={styles.manualMixField}>
+                <Text style={styles.manualMixFieldLabel}>Brine</Text>
+                <TextInput
+                  style={styles.manualMixInput}
+                  value={manualBrineText}
+                  onChangeText={(text) => setManualBrineText(text.replace(/[^0-9]/g, "").slice(0, 3))}
+                  keyboardType="number-pad"
+                  maxLength={3}
+                  placeholder="0"
+                  placeholderTextColor="#8aa0b6"
+                />
+              </View>
+              <Pressable
+                style={styles.manualMixButton}
+                onPress={() => {
+                  setSaltPct(manualSaltValue);
+                  setBrinePct(manualBrineValue);
+                }}
+              >
+                <Text style={styles.manualMixButtonText}>Set</Text>
+              </Pressable>
+            </View>
+          </View>
           <Text style={styles.recommendationReason}>{recommendation.reason}</Text>
           <Pressable
             style={[styles.applyButton, suggestionApplied ? styles.applyButtonDone : null]}
@@ -435,8 +485,9 @@ const styles = StyleSheet.create({
     color: "#2c6fb7",
   },
   subtitle: {
-    fontSize: 16,
+    fontSize: 14,
     textTransform: "capitalize",
+    color: "#1f3550",
   },
   headerMetaRow: {
     flexDirection: "row",
@@ -520,24 +571,79 @@ const styles = StyleSheet.create({
   },
   recommendationCurrent: {
     color: "#36506a",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  recommendationZero: {
-    color: "#1e6d4f",
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: "700",
   },
+  recommendationZero: {
+    color: "#1f3550",
+    fontSize: 12,
+    fontWeight: "700",
+    backgroundColor: "#e8f5e9",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderLeftWidth: 3,
+    borderLeftColor: "#2e7d32",
+  },
   recommendationReason: {
-    color: "#4f6478",
+    color: "#1f3550",
     fontSize: 12,
     lineHeight: 16,
-    backgroundColor: "#f5f7fa",
-    paddingHorizontal: 10,
+    fontWeight: "600",
+    backgroundColor: "#eef4fb",
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 6,
+    borderRadius: 10,
     borderLeftWidth: 3,
     borderLeftColor: "#2c6fb7",
+  },
+  manualMixBlock: {
+    gap: 8,
+  },
+  manualMixLabel: {
+    color: "#36506a",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  manualMixRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+  },
+  manualMixField: {
+    flex: 1,
+    gap: 4,
+  },
+  manualMixFieldLabel: {
+    color: "#63788e",
+    fontSize: 14,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  manualMixInput: {
+    minHeight: 50,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#cfd9e4",
+    backgroundColor: "#fbfcfe",
+    paddingHorizontal: 12,
+    color: "#16324f",
+    fontSize: 22,
+    fontWeight: "700",
+  },
+  manualMixButton: {
+    minWidth: 68,
+    minHeight: 50,
+    borderRadius: 10,
+    backgroundColor: "#2c6fb7",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  manualMixButtonText: {
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "700",
   },
   applyButton: {
     borderRadius: 10,

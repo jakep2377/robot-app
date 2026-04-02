@@ -1,5 +1,12 @@
-import React, { useMemo, useState } from "react";
-import { LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  LayoutChangeEvent,
+  PanResponder,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
 type Props = {
   label: string;
@@ -13,32 +20,79 @@ function clamp(value: number) {
 }
 
 export default function PercentSlider({ label, value, onChange, accentColor }: Props) {
-  const [trackWidth, setTrackWidth] = useState(0);
   const normalizedValue = clamp(value);
-  const filledWidth = useMemo(() => {
-    if (!trackWidth) {
-      return 0;
-    }
-    return (normalizedValue / 100) * trackWidth;
-  }, [normalizedValue, trackWidth]);
+  const trackRef = useRef<View | null>(null);
+  const [trackWidth, setTrackWidth] = useState(0);
+  const [trackLeft, setTrackLeft] = useState(0);
+  const [displayValue, setDisplayValue] = useState(normalizedValue);
+  const isDraggingRef = useRef(false);
+  const pendingValueRef = useRef(normalizedValue);
+  const displayedValue = isDraggingRef.current ? displayValue : normalizedValue;
+  const thumbOffset = useMemo(() => {
+    if (trackWidth <= 0) return 0;
+    return (displayedValue / 100) * trackWidth;
+  }, [displayedValue, trackWidth]);
 
-  const handleLayout = (event: LayoutChangeEvent) => {
+  useEffect(() => {
+    if (!isDraggingRef.current) {
+      setDisplayValue(normalizedValue);
+      pendingValueRef.current = normalizedValue;
+    }
+  }, [normalizedValue]);
+
+  const updateFromPageX = (pageX: number) => {
+    if (trackWidth <= 0) return;
+    const nextValue = clamp(((pageX - trackLeft) / trackWidth) * 100);
+    setDisplayValue(nextValue);
+    pendingValueRef.current = nextValue;
+  };
+
+  const handleTrackLayout = (event: LayoutChangeEvent) => {
     setTrackWidth(event.nativeEvent.layout.width);
+    requestAnimationFrame(() => {
+      trackRef.current?.measureInWindow((x) => {
+        setTrackLeft(x);
+      });
+    });
   };
 
-  const handleTrackPress = (locationX: number) => {
-    if (!trackWidth) {
-      return;
-    }
-    const nextValue = (locationX / trackWidth) * 100;
-    onChange(clamp(nextValue));
-  };
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (event) => {
+          isDraggingRef.current = true;
+          updateFromPageX(event.nativeEvent.pageX);
+        },
+        onPanResponderMove: (event) => {
+          updateFromPageX(event.nativeEvent.pageX);
+        },
+        onPanResponderRelease: () => {
+          isDraggingRef.current = false;
+          const nextValue = pendingValueRef.current;
+          setDisplayValue(nextValue);
+          if (nextValue !== normalizedValue) {
+            onChange(nextValue);
+          }
+        },
+        onPanResponderTerminate: () => {
+          isDraggingRef.current = false;
+          const nextValue = pendingValueRef.current;
+          setDisplayValue(nextValue);
+          if (nextValue !== normalizedValue) {
+            onChange(nextValue);
+          }
+        },
+      }),
+    [normalizedValue, onChange, trackLeft, trackWidth],
+  );
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.label}>{label}</Text>
-        <Text style={[styles.value, { color: accentColor }]}>{normalizedValue}%</Text>
+        <Text style={[styles.value, { color: accentColor }]}>{displayedValue}%</Text>
       </View>
 
       <View style={styles.controlsRow}>
@@ -46,16 +100,24 @@ export default function PercentSlider({ label, value, onChange, accentColor }: P
           <Text style={styles.stepButtonText}>-5</Text>
         </Pressable>
 
-        <Pressable
-          style={styles.trackWrap}
-          onLayout={handleLayout}
-          onPress={(event) => handleTrackPress(event.nativeEvent.locationX)}
+        <View
+          ref={trackRef}
+          style={styles.sliderWrap}
+          onLayout={handleTrackLayout}
+          {...panResponder.panHandlers}
         >
-          <View style={styles.trackBackground}>
-            <View style={[styles.trackFill, { width: filledWidth, backgroundColor: accentColor }]} />
-            <View style={[styles.thumb, { left: Math.max(0, filledWidth - 11), borderColor: accentColor }]} />
-          </View>
-        </Pressable>
+          <View style={styles.trackBase} />
+          <View style={[styles.trackFill, { backgroundColor: accentColor, width: thumbOffset }]} />
+          <View
+            style={[
+              styles.thumb,
+              {
+                borderColor: accentColor,
+                left: thumbOffset,
+              },
+            ]}
+          />
+        </View>
 
         <Pressable style={styles.stepButton} onPress={() => onChange(clamp(normalizedValue + 5))}>
           <Text style={styles.stepButtonText}>+5</Text>
@@ -89,42 +151,47 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   stepButton: {
-    width: 42,
-    height: 36,
+    width: 46,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 10,
+    borderRadius: 12,
     backgroundColor: "#eef3f8",
   },
   stepButtonText: {
     color: "#16324f",
     fontWeight: "700",
   },
-  trackWrap: {
+  sliderWrap: {
     flex: 1,
-    paddingVertical: 10,
+    height: 32,
+    justifyContent: "center",
   },
-  trackBackground: {
-    height: 12,
+  trackBase: {
+    height: 6,
     borderRadius: 999,
     backgroundColor: "#d7dfe8",
-    overflow: "visible",
-    justifyContent: "center",
   },
   trackFill: {
     position: "absolute",
     left: 0,
-    top: 0,
-    bottom: 0,
+    top: 13,
+    height: 6,
     borderRadius: 999,
   },
   thumb: {
     position: "absolute",
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    top: 6,
+    width: 20,
+    height: 20,
+    marginLeft: -10,
+    borderRadius: 999,
     backgroundColor: "#ffffff",
     borderWidth: 3,
-    top: -5,
+    shadowColor: "#7a8794",
+    shadowOpacity: 0.28,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
 });
