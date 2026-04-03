@@ -8,6 +8,7 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
+.gradle-local/
 
 # Native
 .kotlin/
@@ -29,6 +30,7 @@ yarn-error.*
 # macOS
 .DS_Store
 *.pem
+.idea/caches/
 
 # local env files
 .env*.local

@@ -36,6 +36,19 @@
 
     "plugins": [
       "expo-dev-client",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Navigator to use your phone location for weather scheduling."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#1f5f9f"
+        }
+      ],
       "expo-maps"
     ],
 

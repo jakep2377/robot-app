@@ -1,49 +1,32 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-
-type WeatherMain = {
-  temp: number;
-  feels_like: number;
-  temp_min: number;
-  temp_max: number;
-  pressure: number;
-  humidity: number;
-};
-
-type WeatherWind = {
-  speed?: number;
-  deg?: number;
-  gust?: number;
-};
-
-type WeatherClouds = {
-  all?: number;
-};
-
-type WeatherSys = {
-  sunrise?: number;
-  sunset?: number;
-};
-
-type WeatherCondition = {
-  main?: string;
-  description?: string;
-  icon?: string;
-};
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 type WeatherPayload = {
   name: string;
   dt: number;
   timezone?: number;
   visibility?: number;
-  weather: WeatherCondition[];
-  main: WeatherMain;
-  wind?: WeatherWind;
-  clouds?: WeatherClouds;
+  weather: Array<{ main?: string; description?: string }>;
+  main: { temp: number; feels_like: number; temp_min: number; temp_max: number; pressure: number; humidity: number };
+  wind?: { speed?: number; deg?: number; gust?: number };
+  clouds?: { all?: number };
   rain?: Record<string, number>;
   snow?: Record<string, number>;
-  sys?: WeatherSys;
+  sys?: { sunrise?: number; sunset?: number };
+};
+
+type ForecastPayload = {
+  list: Array<{
+    dt: number;
+    weather: Array<{ main?: string; description?: string }>;
+    main: { temp: number; humidity: number };
+    wind?: { speed?: number; gust?: number };
+    rain?: Record<string, number>;
+    snow?: Record<string, number>;
+  }>;
+  city?: { timezone?: number };
 };
 
 type Props = {
@@ -53,89 +36,158 @@ type Props = {
   setBrinePct: (value: number) => void;
 };
 
-type DispersionRecommendation = {
-  saltPct: number;
-  brinePct: number;
-  reason: string;
-};
+type Mix = { saltPct: number; brinePct: number; reason: string };
+type LocationState = { latitude: number; longitude: number; label: string; source: "city" | "phone" };
+type ScheduleSuggestion = { at: number; label: string; notifyAt: Date; mix: Mix; condition: string } | null;
+type LookAheadItem = { label: string; tempText: string; condition: string; mixText: string };
+type LookAheadDay = { key: string; label: string; items: LookAheadItem[] };
 
+const API_KEY = "e324705094164f5dc98161647cccc83a";
+const DEFAULT_LOCATION: LocationState = { latitude: 41.0814, longitude: -81.519, label: "Akron", source: "city" };
 const clampPct = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 
-function getWeatherIcon(condition: string): string {
-  if (!condition) return "?";
-  const text = condition.toLowerCase();
-  if (/clear|sunny/.test(text)) return "☀";
-  if (/cloud/.test(text)) return "☁";
-  if (/rain|drizzle|shower/.test(text)) return "☂";
-  if (/thunder|storm/.test(text)) return "⚡";
-  if (/snow|sleet|ice|freezing/.test(text)) return "❄";
-  if (/mist|fog/.test(text)) return "≋";
-  if (/wind/.test(text)) return "↝";
-  return "○";
-}
+const getPrecipInches = (value?: { rain?: Record<string, number>; snow?: Record<string, number> }) =>
+  Math.max(value?.rain?.["1h"] ?? 0, value?.rain?.["3h"] ?? 0, value?.snow?.["1h"] ?? 0, value?.snow?.["3h"] ?? 0) / 25.4;
 
-function calculateDewPoint(tempF: number, humidity: number): number {
-  const tempC = (tempF - 32) * (5 / 9);
-  const a = 17.27;
-  const b = 237.7;
-  const alphaTn = (a * tempC) / (b + tempC) + Math.log(humidity / 100);
-  const dewPointC = (b * alphaTn) / (a - alphaTn);
-  return (dewPointC * 9) / 5 + 32;
-}
-
-function calculateFrostRisk(tempF: number, humidity: number): { riskLevel: "high" | "moderate" | "low"; description: string } {
-  const dewPoint = calculateDewPoint(tempF, humidity);
-  const spreadF = tempF - dewPoint;
-
-  if (tempF <= 32 && dewPoint <= 32) {
-    return { riskLevel: "high", description: "Frost likely" };
-  }
-  if (tempF <= 35 && spreadF < 3) {
-    return { riskLevel: "moderate", description: "Frost risk rising" };
-  }
-  if (tempF > 45 || spreadF > 8) {
-    return { riskLevel: "low", description: "Low frost risk" };
-  }
-  return { riskLevel: "moderate", description: "Monitor conditions" };
-}
-
-function formatLocalTime(unixSeconds: number | undefined, timezoneSeconds: number | undefined) {
+const formatLocalTime = (unixSeconds?: number, timezoneSeconds?: number) => {
   if (!unixSeconds) return "--";
   const date = new Date((unixSeconds + (timezoneSeconds ?? 0)) * 1000);
   return `${date.getUTCHours().toString().padStart(2, "0")}:${date.getUTCMinutes().toString().padStart(2, "0")}`;
+};
+
+const getShiftedDate = (unixSeconds: number, timezoneSeconds?: number) =>
+  new Date((unixSeconds + (timezoneSeconds ?? 0)) * 1000);
+
+const formatForecastLabel = (unixSeconds: number, timezoneSeconds?: number) =>
+  getShiftedDate(unixSeconds, timezoneSeconds).toLocaleString("en-US", {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  });
+
+const formatShiftedDayKey = (unixSeconds: number, timezoneSeconds?: number) => {
+  const shifted = getShiftedDate(unixSeconds, timezoneSeconds);
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const formatShiftedDayLabel = (unixSeconds: number, timezoneSeconds?: number) =>
+  getShiftedDate(unixSeconds, timezoneSeconds).toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+
+function getWeatherIconName(condition: string) {
+  const text = condition.toLowerCase();
+  if (/clear|sunny/.test(text)) return "weather-sunny";
+  if (/cloud/.test(text)) return "weather-cloudy";
+  if (/rain|drizzle|shower/.test(text)) return "weather-rainy";
+  if (/thunder|storm/.test(text)) return "weather-lightning";
+  if (/snow|sleet|ice|freezing/.test(text)) return "weather-snowy";
+  if (/mist|fog/.test(text)) return "weather-fog";
+  return "weather-partly-cloudy";
+}
+
+function frostRisk(tempF: number, humidity: number) {
+  const tempC = (tempF - 32) * (5 / 9);
+  const dewPointC = (237.7 * (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100))) / (17.27 - (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100)));
+  const dewPointF = (dewPointC * 9) / 5 + 32;
+  const spreadF = tempF - dewPointF;
+  if (tempF <= 32 && dewPointF <= 32) return { level: "high", text: "Frost likely" };
+  if (tempF <= 35 && spreadF < 3) return { level: "moderate", text: "Frost risk rising" };
+  if (tempF > 45 || spreadF > 8) return { level: "low", text: "Low frost risk" };
+  return { level: "moderate", text: "Monitor conditions" };
+}
+
+function buildMix(tempF: number, humidity: number, conditionText: string, precipInches: number, windSpeed: number, windGust: number): Mix {
+  const snowOrIce = /snow|sleet|freezing|ice/.test(conditionText);
+  const rain = /rain|drizzle|shower|thunder/.test(conditionText);
+  const frost = frostRisk(tempF, humidity);
+  let salt = 70;
+  let brine = 80;
+  if (tempF <= 15) { salt = 100; brine = 35; }
+  else if (tempF <= 25) { salt = 90; brine = 55; }
+  else if (tempF <= 32) { salt = 75; brine = 80; }
+  else { salt = 45; brine = 100; }
+  if (frost.level === "low" && !snowOrIce && !rain && tempF >= 38 && humidity < 85 && precipInches < 0.02) {
+    return { saltPct: 0, brinePct: 0, reason: "No dispersion recommended" };
+  }
+  const reasons = [`Base from ${Math.round(tempF)} F`];
+  if (snowOrIce) { salt = Math.max(salt, 95); brine = Math.min(brine, 60); reasons.push("snow or ice"); }
+  else if (rain) { brine = Math.max(brine, 90); salt = Math.min(salt, 70); reasons.push("rain"); }
+  if (precipInches >= 0.08 && tempF <= 32) { salt = Math.min(100, salt + 8); reasons.push("higher precip"); }
+  if (windSpeed >= 20 || windGust >= 28) { salt = Math.min(100, salt + 5); reasons.push("strong wind"); }
+  return { saltPct: clampPct(salt), brinePct: clampPct(brine), reason: reasons.join(" | ") };
+}
+
+function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
+  let score = 0;
+  const frost = frostRisk(tempF, humidity);
+  if (mix.saltPct > 0 || mix.brinePct > 0) score += 35;
+  if (tempF <= 32) score += 24; else if (tempF <= 36) score += 14;
+  if (/snow|sleet|freezing|ice/.test(conditionText)) score += 22;
+  if (/rain|drizzle|shower|thunder/.test(conditionText)) score += 10;
+  if (precipInches >= 0.05) score += 10;
+  if (frost.level === "high") score += 16; else if (frost.level === "moderate") score += 8;
+  if (windSpeed >= 18 || windGust >= 25) score -= 10;
+  if (mix.saltPct === 0 && mix.brinePct === 0) score -= 20;
+  return score;
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.message ?? "Request failed");
+  return payload as T;
+}
+
+function getLocationModule() {
+  try {
+    return require("expo-location");
+  } catch {
+    return null;
+  }
+}
+
+function getNotificationsModule() {
+  try {
+    return require("expo-notifications");
+  } catch {
+    return null;
+  }
 }
 
 export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
   const insets = useSafeAreaInsets();
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
+  const [forecast, setForecast] = useState<ForecastPayload | null>(null);
+  const [activeLocation, setActiveLocation] = useState<LocationState>(DEFAULT_LOCATION);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [locating, setLocating] = useState(false);
+  const [notificationState, setNotificationState] = useState("Alerts off");
+  const [scheduledAlertText, setScheduledAlertText] = useState("No alert scheduled");
   const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
   const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
+  const [selectedLookAheadDay, setSelectedLookAheadDay] = useState("");
+  const [showLookAhead, setShowLookAhead] = useState(false);
 
-  const theme = {
-    pageBg: "#f3f5f8",
-    cardBg: "#ffffff",
-    cardBorder: "#dce5ef",
-    title: "#16324f",
-    text: "#304863",
-    muted: "#63788e",
-  };
-
-  const API_KEY = "e324705094164f5dc98161647cccc83a";
-  const CITY = "Akron,US";
-
-  const loadWeather = async () => {
+  const loadWeather = async (location: LocationState) => {
     setLoading(true);
     try {
-      const response = await fetch(
-        `https://api.openweathermap.org/data/2.5/weather?q=${CITY}&units=imperial&appid=${API_KEY}`
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload?.message ?? "Unable to load weather");
-      }
-      setWeather(payload as WeatherPayload);
+      const query = `lat=${location.latitude}&lon=${location.longitude}&units=imperial&appid=${API_KEY}`;
+      const [current, future] = await Promise.all([
+        fetchJson<WeatherPayload>(`https://api.openweathermap.org/data/2.5/weather?${query}`),
+        fetchJson<ForecastPayload>(`https://api.openweathermap.org/data/2.5/forecast?${query}`),
+      ]);
+      setWeather(current);
+      setForecast(future);
+      setActiveLocation({ ...location, label: current.name || location.label });
       setError(null);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to load weather");
@@ -144,552 +196,360 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     }
   };
 
-  useEffect(() => {
-    loadWeather();
-  }, []);
+  useEffect(() => { loadWeather(DEFAULT_LOCATION); }, []);
+  useEffect(() => { setManualSaltText(String(clampPct(saltPct))); }, [saltPct]);
+  useEffect(() => { setManualBrineText(String(clampPct(brinePct))); }, [brinePct]);
 
-  useEffect(() => {
-    setManualSaltText(String(clampPct(saltPct)));
-  }, [saltPct]);
-
-  useEffect(() => {
-    setManualBrineText(String(clampPct(brinePct)));
-  }, [brinePct]);
-
-  const weatherMeta = useMemo(() => {
-    if (!weather) {
-      return null;
-    }
-
-    return {
-      updatedAt: formatLocalTime(weather.dt, weather.timezone),
-      sunrise: formatLocalTime(weather.sys?.sunrise, weather.timezone),
-      sunset: formatLocalTime(weather.sys?.sunset, weather.timezone),
-      precipitationInches: Math.max(
-        weather.rain?.["1h"] ?? 0,
-        weather.rain?.["3h"] ?? 0,
-        weather.snow?.["1h"] ?? 0,
-        weather.snow?.["3h"] ?? 0
-      ) / 25.4,
-    };
+  const currentMix = useMemo(() => {
+    if (!weather) return null;
+    return buildMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0);
   }, [weather]);
 
-  const recommendation = useMemo<DispersionRecommendation | null>(() => {
-    if (!weather || !weatherMeta) {
-      return null;
-    }
-
-    const conditionText = `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase();
-    const isSnowOrIce = /snow|sleet|freezing|ice/.test(conditionText);
-    const isRain = /rain|drizzle|shower|thunder/.test(conditionText);
-    const tempF = weather.main.temp;
-    const windSpeed = weather.wind?.speed ?? 0;
-    const windGust = weather.wind?.gust ?? 0;
-    const humidity = weather.main.humidity;
-    const frostRisk = calculateFrostRisk(tempF, humidity);
-
-    let suggestedSalt = 70;
-    let suggestedBrine = 80;
-
-    if (tempF <= 15) {
-      suggestedSalt = 100;
-      suggestedBrine = 35;
-    } else if (tempF <= 25) {
-      suggestedSalt = 90;
-      suggestedBrine = 55;
-    } else if (tempF <= 32) {
-      suggestedSalt = 75;
-      suggestedBrine = 80;
-    } else {
-      suggestedSalt = 45;
-      suggestedBrine = 100;
-    }
-
-    const reasons: string[] = [`Base from ${Math.round(tempF)} F`];
-
-    if (
-      frostRisk.riskLevel === "low" &&
-      !isSnowOrIce &&
-      !isRain &&
-      tempF >= 38 &&
-      humidity < 85 &&
-      weatherMeta.precipitationInches < 0.02
-    ) {
-      return {
-        saltPct: 0,
-        brinePct: 0,
-        reason: "No dispersion recommended",
-      };
-    }
-
-    if (isSnowOrIce) {
-      suggestedSalt = Math.max(suggestedSalt, 95);
-      suggestedBrine = Math.min(suggestedBrine, 60);
-      reasons.push("snow or ice");
-    } else if (isRain) {
-      suggestedBrine = Math.max(suggestedBrine, 90);
-      suggestedSalt = Math.min(suggestedSalt, 70);
-      reasons.push("rain");
-    }
-
-    if (weatherMeta.precipitationInches >= 0.08 && tempF <= 32) {
-      suggestedSalt = Math.min(100, suggestedSalt + 8);
-      reasons.push("higher precip");
-    }
-
-    if (windSpeed >= 20 || windGust >= 28) {
-      suggestedSalt = Math.min(100, suggestedSalt + 5);
-      reasons.push("strong wind");
-    }
-
+  const suggestion = useMemo<ScheduleSuggestion>(() => {
+    if (!forecast?.list?.length) return null;
+    const timezone = forecast.city?.timezone ?? weather?.timezone;
+    const now = Math.floor(Date.now() / 1000);
+    const best = forecast.list
+      .filter((entry) => entry.dt >= now && entry.dt <= now + 36 * 3600)
+      .map((entry) => {
+        const condition = `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase();
+        const mix = buildMix(entry.main.temp, entry.main.humidity, condition, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0);
+        return { entry, mix, condition, score: scoreForecast(entry.main.temp, condition, entry.main.humidity, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0, mix) };
+      })
+      .sort((a, b) => b.score - a.score || a.entry.dt - b.entry.dt)[0];
+    if (!best || best.score <= 0) return null;
     return {
-      saltPct: clampPct(suggestedSalt),
-      brinePct: clampPct(suggestedBrine),
-      reason: reasons.join(" · "),
+      at: best.entry.dt,
+      label: formatForecastLabel(best.entry.dt, timezone),
+      notifyAt: new Date(Math.max(Date.now() + 60_000, best.entry.dt * 1000 - 30 * 60 * 1000)),
+      mix: best.mix,
+      condition: best.entry.weather?.[0]?.description ?? "forecast update",
     };
-  }, [weather, weatherMeta]);
+  }, [forecast, weather?.timezone]);
 
-  if (loading) {
-    return (
-      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-        <ActivityIndicator size="large" />
-        <Text style={[styles.metaText, { color: theme.muted }]}>Loading weather...</Text>
-      </View>
-    );
-  }
+  const lookAheadDays = useMemo<LookAheadDay[]>(() => {
+    if (!forecast?.list?.length) return [];
+    const timezone = forecast.city?.timezone ?? weather?.timezone;
+    const grouped = new Map<string, LookAheadDay>();
 
-  if (error) {
-    return (
-      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-        <Text style={styles.error}>Error: {error}</Text>
-        <Pressable style={styles.refreshButton} onPress={loadWeather}>
-          <Text style={styles.refreshButtonText}>Retry</Text>
-        </Pressable>
-      </View>
-    );
-  }
+    forecast.list.forEach((entry) => {
+      const condition = entry.weather?.[0]?.description ?? "Forecast update";
+      const mix = buildMix(
+        entry.main.temp,
+        entry.main.humidity,
+        `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase(),
+        getPrecipInches(entry),
+        entry.wind?.speed ?? 0,
+        entry.wind?.gust ?? 0,
+      );
+      const dayKey = formatShiftedDayKey(entry.dt, timezone);
+      const dayLabel = formatShiftedDayLabel(entry.dt, timezone);
+      const nextItem: LookAheadItem = {
+        label: formatForecastLabel(entry.dt, timezone),
+        tempText: `${Math.round(entry.main.temp)}°F`,
+        condition,
+        mixText: `${mix.saltPct}% / ${mix.brinePct}%`,
+      };
 
-  if (!weather || !weatherMeta) {
-    return (
-      <View style={[styles.centerState, { backgroundColor: theme.pageBg, paddingTop: insets.top }]}>
-        <Text style={styles.error}>Weather data is unavailable.</Text>
-      </View>
-    );
-  }
+      if (grouped.has(dayKey)) {
+        grouped.get(dayKey)?.items.push(nextItem);
+      } else {
+        grouped.set(dayKey, { key: dayKey, label: dayLabel, items: [nextItem] });
+      }
+    });
 
-  const condition = weather.weather?.[0]?.description ?? "unknown";
-  const weatherIcon = getWeatherIcon(condition);
-  const windSpeed = weather.wind?.speed ?? 0;
-  const windGust = weather.wind?.gust ?? 0;
-  const windDirection = weather.wind?.deg ?? 0;
-  const visibilityMiles = weather.visibility ? weather.visibility / 1609.34 : 0;
-  const dewPointF = calculateDewPoint(weather.main.temp, weather.main.humidity);
-  const frostRisk = calculateFrostRisk(weather.main.temp, weather.main.humidity);
-  const suggestionApplied = recommendation
-    ? clampPct(saltPct) === recommendation.saltPct && clampPct(brinePct) === recommendation.brinePct
-    : false;
+    return Array.from(grouped.values()).slice(0, 5);
+  }, [forecast, weather?.timezone]);
+
+  useEffect(() => {
+    if (!lookAheadDays.length) {
+      setSelectedLookAheadDay("");
+      return;
+    }
+    if (!lookAheadDays.some((day) => day.key === selectedLookAheadDay)) {
+      setSelectedLookAheadDay(lookAheadDays[0].key);
+    }
+  }, [lookAheadDays, selectedLookAheadDay]);
+
+  const lookAheadLegacy = useMemo<LookAheadItem[]>(() => {
+    if (!forecast?.list?.length) return [];
+    const timezone = forecast.city?.timezone ?? weather?.timezone;
+    return forecast.list.slice(0, 4).map((entry) => {
+      const condition = entry.weather?.[0]?.description ?? "Forecast update";
+      const mix = buildMix(
+        entry.main.temp,
+        entry.main.humidity,
+        `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase(),
+        getPrecipInches(entry),
+        entry.wind?.speed ?? 0,
+        entry.wind?.gust ?? 0,
+      );
+      return {
+        label: formatForecastLabel(entry.dt, timezone),
+        tempText: `${Math.round(entry.main.temp)}°F`,
+        condition,
+        mixText: `${mix.saltPct}% / ${mix.brinePct}%`,
+      };
+    });
+  }, [forecast, weather?.timezone]);
+
+  const usePhoneLocation = async () => {
+    setLocating(true);
+    try {
+      const Location = getLocationModule();
+      if (!Location) {
+        Alert.alert("Rebuild Needed", "Location support was added recently. Rebuild the Android app to use phone-based scheduling.");
+        return false;
+      }
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== "granted") {
+        Alert.alert("Location Needed", "Allow location access to build scheduling from the phone's position.");
+        return false;
+      }
+      const lastKnown = await Location.getLastKnownPositionAsync();
+      const current = lastKnown ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      await loadWeather({ latitude: current.coords.latitude, longitude: current.coords.longitude, label: "Phone location", source: "phone" });
+      return true;
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to read phone location");
+      return false;
+    } finally {
+      setLocating(false);
+    }
+  };
+
+  const enableAlerts = async () => {
+    const Notifications = getNotificationsModule();
+    if (!Notifications) {
+      setNotificationState("Alerts unavailable");
+      Alert.alert("Rebuild Needed", "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.");
+      return false;
+    }
+
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      }),
+    });
+
+    await Notifications.setNotificationChannelAsync("weather-scheduler", {
+      name: "Weather Scheduler",
+      importance: Notifications.AndroidImportance.DEFAULT,
+      vibrationPattern: [0, 250, 150, 250],
+      lightColor: "#1f5f9f",
+    });
+
+    const permission = await Notifications.requestPermissionsAsync();
+    if (!permission.granted) {
+      setNotificationState("Alerts denied");
+      Alert.alert("Notifications Disabled", "Allow notifications if you want scheduling alerts on this phone.");
+      return false;
+    }
+    setNotificationState("Alerts ready");
+    return true;
+  };
+
+  const scheduleAlert = async () => {
+    if (!suggestion) {
+      Alert.alert("No Suggested Window", "There is no recommended operating window in the next 36 hours.");
+      return;
+    }
+    if (activeLocation.source !== "phone") {
+      const locationReady = await usePhoneLocation();
+      if (!locationReady) {
+        return;
+      }
+    }
+    const Notifications = getNotificationsModule();
+    if (!Notifications) {
+      setNotificationState("Alerts unavailable");
+      Alert.alert("Rebuild Needed", "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.");
+      return;
+    }
+    const ok = await enableAlerts();
+    if (!ok) return;
+    await Notifications.cancelAllScheduledNotificationsAsync();
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "Weather operating window",
+        body: `${suggestion.label}: Salt ${suggestion.mix.saltPct}% | Brine ${suggestion.mix.brinePct}%`,
+      },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: suggestion.notifyAt, channelId: "weather-scheduler" },
+    });
+    setScheduledAlertText(`Alert set for ${suggestion.notifyAt.toLocaleString()}`);
+  };
+
+  if (loading) return <View style={[styles.centerState, { paddingTop: insets.top }]}><ActivityIndicator size="large" /><Text style={styles.metaText}>Loading weather...</Text></View>;
+  if (error || !weather || !currentMix) return <View style={[styles.centerState, { paddingTop: insets.top }]}><Text style={styles.error}>Error: {error ?? "Weather unavailable"}</Text><Pressable style={styles.refreshButton} onPress={() => loadWeather(activeLocation)}><Text style={styles.refreshButtonText}>Retry</Text></Pressable></View>;
+
+  const frost = frostRisk(weather.main.temp, weather.main.humidity);
+  const currentApplied = clampPct(saltPct) === currentMix.saltPct && clampPct(brinePct) === currentMix.brinePct;
   const manualSaltValue = clampPct(Number.parseInt(manualSaltText || "0", 10) || 0);
   const manualBrineValue = clampPct(Number.parseInt(manualBrineText || "0", 10) || 0);
-
-  const frostRiskStyle = frostRisk.riskLevel === "high"
-    ? styles.frostRiskHigh
-    : frostRisk.riskLevel === "moderate"
-      ? styles.frostRiskModerate
-      : styles.frostRiskLow;
+  const weatherIcon = getWeatherIconName(weather.weather?.[0]?.description ?? "");
+  const badgeStyle = frost.level === "high" ? styles.badgeHigh : frost.level === "moderate" ? styles.badgeModerate : styles.badgeLow;
+  const activeLookAheadDay = lookAheadDays.find((day) => day.key === selectedLookAheadDay) ?? lookAheadDays[0] ?? null;
 
   return (
-    <ScrollView contentContainerStyle={[styles.scrollContent, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}>
-      <View style={[styles.headerCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-        <Text style={[styles.eyebrow, { color: theme.muted }]}>Weather</Text>
-        <Text style={[styles.title, { color: theme.title }]}>{weather.name}</Text>
+    <ScrollView contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 8 }]}>
+      <View style={styles.card}>
+        <Text style={styles.eyebrow}>Weather</Text>
+        <Text style={styles.title}>{activeLocation.label}</Text>
         <View style={styles.heroRow}>
-          <Text style={styles.weatherIcon}>{weatherIcon}</Text>
+          <MaterialCommunityIcons name={weatherIcon} size={54} color="#d6e1ec" />
           <View style={styles.heroText}>
             <Text style={styles.temp}>{Math.round(weather.main.temp)}°F</Text>
-            <Text style={[styles.subtitle, { color: theme.text }]}>{condition}</Text>
+            <Text style={styles.subtitle}>{weather.weather?.[0]?.description ?? "Unknown"}</Text>
           </View>
         </View>
-        <View style={[styles.frostRiskBadge, frostRiskStyle]}>
-          <Text style={styles.frostRiskText}>{frostRisk.description}</Text>
-        </View>
+        <View style={[styles.callout, badgeStyle]}><Text style={styles.calloutText}>{frost.text}</Text></View>
         <View style={styles.headerMetaRow}>
-          <Text style={[styles.metaText, { color: theme.muted }]}>Updated {weatherMeta.updatedAt}</Text>
-          <Pressable style={styles.refreshButton} onPress={loadWeather}>
-            <Text style={styles.refreshButtonText}>Refresh</Text>
-          </Pressable>
+          <Text style={styles.metaText}>Updated {formatLocalTime(weather.dt, weather.timezone)}</Text>
+          <Pressable style={styles.refreshButton} onPress={() => loadWeather(activeLocation)}><Text style={styles.refreshButtonText}>Refresh</Text></Pressable>
         </View>
       </View>
 
-      {recommendation ? (
-        <View style={[styles.recommendationCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-          <Text style={styles.sectionTitle}>Recommended Mix</Text>
-          <View style={styles.recommendationRow}>
-            <ValuePill label="Salt" value={`${recommendation.saltPct}%`} />
-            <ValuePill label="Brine" value={`${recommendation.brinePct}%`} />
-          </View>
-          {recommendation.saltPct === 0 && recommendation.brinePct === 0 ? (
-            <Text style={styles.recommendationZero}>Conditions look clear enough to skip treatment.</Text>
-          ) : null}
-          <Text style={styles.recommendationCurrent}>Current: Salt {clampPct(saltPct)}% · Brine {clampPct(brinePct)}%</Text>
-          <View style={styles.manualMixBlock}>
-            <Text style={styles.manualMixLabel}>Manual Entry</Text>
-            <View style={styles.manualMixRow}>
-              <View style={styles.manualMixField}>
-                <Text style={styles.manualMixFieldLabel}>Salt</Text>
-                <TextInput
-                  style={styles.manualMixInput}
-                  value={manualSaltText}
-                  onChangeText={(text) => setManualSaltText(text.replace(/[^0-9]/g, "").slice(0, 3))}
-                  keyboardType="number-pad"
-                  maxLength={3}
-                  placeholder="0"
-                  placeholderTextColor="#8aa0b6"
-                />
-              </View>
-              <View style={styles.manualMixField}>
-                <Text style={styles.manualMixFieldLabel}>Brine</Text>
-                <TextInput
-                  style={styles.manualMixInput}
-                  value={manualBrineText}
-                  onChangeText={(text) => setManualBrineText(text.replace(/[^0-9]/g, "").slice(0, 3))}
-                  keyboardType="number-pad"
-                  maxLength={3}
-                  placeholder="0"
-                  placeholderTextColor="#8aa0b6"
-                />
-              </View>
-              <Pressable
-                style={styles.manualMixButton}
-                onPress={() => {
-                  setSaltPct(manualSaltValue);
-                  setBrinePct(manualBrineValue);
-                }}
-              >
-                <Text style={styles.manualMixButtonText}>Set</Text>
-              </Pressable>
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Recommended Mix</Text>
+        <View style={styles.row}>
+          <ValuePill label="Salt" value={`${currentMix.saltPct}%`} />
+          <ValuePill label="Brine" value={`${currentMix.brinePct}%`} />
+        </View>
+        {currentMix.saltPct === 0 && currentMix.brinePct === 0 ? <Text style={[styles.callout, styles.badgeLow, styles.calloutText]}>Conditions look clear enough to skip treatment.</Text> : null}
+        <Text style={styles.currentText}>Current: Salt {clampPct(saltPct)}% | Brine {clampPct(brinePct)}%</Text>
+        <Text style={styles.manualLabel}>Manual Entry</Text>
+        <View style={styles.manualRow}>
+          <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Salt</Text><TextInput style={styles.manualInput} value={manualSaltText} onChangeText={(text) => setManualSaltText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
+          <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Brine</Text><TextInput style={styles.manualInput} value={manualBrineText} onChangeText={(text) => setManualBrineText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
+          <Pressable style={styles.manualButton} onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }}><Text style={styles.manualButtonText}>Set</Text></Pressable>
+        </View>
+        <Text style={[styles.callout, styles.badgeBlue, styles.calloutText]}>{currentMix.reason}</Text>
+        <Pressable style={[styles.applyButton, currentApplied ? styles.applyButtonDone : null]} onPress={() => { setSaltPct(currentMix.saltPct); setBrinePct(currentMix.brinePct); }}><Text style={styles.applyButtonText}>{currentApplied ? "Applied" : "Apply Recommendation"}</Text></Pressable>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Scheduling Mode</Text>
+        <Text style={styles.metaText}>Source: {activeLocation.source === "phone" ? "Phone location" : "City fallback"}</Text>
+        <Text style={styles.schedulePrimary}>{suggestion ? `Potential event: ${suggestion.label}` : "No potential event in the next 36 hours."}</Text>
+        <Text style={styles.scheduleMeta}>{suggestion ? `Mix ${suggestion.mix.saltPct}% salt | ${suggestion.mix.brinePct}% brine | ${suggestion.condition}` : "The forecast is mild enough that no operation is suggested right now."}</Text>
+        <Text style={styles.scheduleMeta}>{notificationState}</Text>
+        <Text style={styles.scheduleMeta}>{scheduledAlertText}</Text>
+        <View style={styles.lookAheadHeader}>
+          <Text style={styles.lookAheadTitle}>Look Ahead</Text>
+          <Pressable style={styles.lookAheadToggle} onPress={() => setShowLookAhead((value) => !value)}>
+            <Text style={styles.lookAheadToggleText}>{showLookAhead ? "Hide" : "Show"}</Text>
+          </Pressable>
+        </View>
+        {showLookAhead ? (
+          <>
+            <View style={styles.lookAheadMenu}>
+              {lookAheadDays.map((day) => (
+                <Pressable
+                  key={day.key}
+                  style={[styles.lookAheadMenuButton, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuButtonActive : null]}
+                  onPress={() => setSelectedLookAheadDay(day.key)}
+                >
+                  <Text style={[styles.lookAheadMenuText, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuTextActive : null]}>{day.label}</Text>
+                </Pressable>
+              ))}
             </View>
-          </View>
-          <Text style={styles.recommendationReason}>{recommendation.reason}</Text>
-          <Pressable
-            style={[styles.applyButton, suggestionApplied ? styles.applyButtonDone : null]}
-            onPress={() => {
-              setSaltPct(recommendation.saltPct);
-              setBrinePct(recommendation.brinePct);
-            }}
-          >
-            <Text style={styles.applyButtonText}>{suggestionApplied ? "Applied" : "Apply Recommendation"}</Text>
-          </Pressable>
-        </View>
-      ) : null}
-
-      <View style={styles.gridRow}>
-        <InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} />
-        <InfoCard label="Humidity" value={`${weather.main.humidity}%`} />
+            <View style={styles.lookAheadList}>
+              {activeLookAheadDay?.items.map((item) => (
+                <View key={`${activeLookAheadDay.key}-${item.label}`} style={styles.lookAheadCard}>
+                  <Text style={styles.lookAheadLabel}>{item.label}</Text>
+                  <Text style={styles.lookAheadTemp}>{item.tempText}</Text>
+                  <Text style={styles.lookAheadCondition}>{item.condition}</Text>
+                  <Text style={styles.lookAheadMix}>{item.mixText}</Text>
+                </View>
+              ))}
+            </View>
+          </>
+        ) : null}
+        <Pressable style={styles.secondaryButton} onPress={usePhoneLocation}><Text style={styles.secondaryButtonText}>{locating ? "Locating..." : "Refresh From Phone Location"}</Text></Pressable>
+        <Pressable style={[styles.primaryScheduleButton, !suggestion ? styles.primaryScheduleButtonDisabled : null]} onPress={scheduleAlert} disabled={!suggestion}><Text style={styles.primaryScheduleText}>Schedule Service</Text></Pressable>
       </View>
 
-      <View style={styles.gridRow}>
-        <InfoCard label="Dew Point" value={`${Math.round(dewPointF)}°F`} />
-        <InfoCard label="Spread" value={`${(weather.main.temp - dewPointF).toFixed(1)}°F`} detail="Temp vs dew point" />
-      </View>
-
-      <View style={styles.gridRow}>
-        <InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} />
-        <InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} />
-      </View>
-
-      <View style={styles.gridRow}>
-        <InfoCard label="Wind" value={`${windSpeed.toFixed(1)} mph`} detail={`Dir ${windDirection.toFixed(0)}° · Gust ${windGust.toFixed(1)} mph`} />
-        <InfoCard label="Visibility" value={`${visibilityMiles.toFixed(1)} mi`} />
-      </View>
-
-      <View style={styles.gridRow}>
-        <InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} />
-        <InfoCard label="Precip" value={`${weatherMeta.precipitationInches.toFixed(2)} in`} />
-      </View>
-
-      <View style={styles.gridRow}>
-        <InfoCard label="Sunrise" value={weatherMeta.sunrise} />
-        <InfoCard label="Sunset" value={weatherMeta.sunset} />
-      </View>
+      <View style={styles.row}><InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} /><InfoCard label="Humidity" value={`${weather.main.humidity}%`} /></View>
+      <View style={styles.row}><InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} /><InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} /></View>
+      <View style={styles.row}><InfoCard label="Wind" value={`${(weather.wind?.speed ?? 0).toFixed(1)} mph`} detail={`Dir ${(weather.wind?.deg ?? 0).toFixed(0)}° | Gust ${(weather.wind?.gust ?? 0).toFixed(1)} mph`} /><InfoCard label="Precip" value={`${getPrecipInches(weather).toFixed(2)} in`} /></View>
+      <View style={styles.row}><InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} /><InfoCard label="Visibility" value={`${((weather.visibility ?? 0) / 1609.34).toFixed(1)} mi`} /></View>
+      <View style={styles.row}><InfoCard label="Sunrise" value={formatLocalTime(weather.sys?.sunrise, weather.timezone)} /><InfoCard label="Sunset" value={formatLocalTime(weather.sys?.sunset, weather.timezone)} /></View>
     </ScrollView>
   );
 }
 
 function ValuePill({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.recommendationPill}>
-      <Text style={styles.recommendationPillLabel}>{label}</Text>
-      <Text style={styles.recommendationPillValue}>{value}</Text>
-    </View>
-  );
+  return <View style={styles.pill}><Text style={styles.pillLabel}>{label}</Text><Text style={styles.pillValue}>{value}</Text></View>;
 }
 
 function InfoCard({ label, value, detail }: { label: string; value: string; detail?: string }) {
-  return (
-    <View style={styles.infoCard}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
-      {detail ? <Text style={styles.infoDetail}>{detail}</Text> : null}
-    </View>
-  );
+  return <View style={styles.infoCard}><Text style={styles.infoLabel}>{label}</Text><Text style={styles.infoValue}>{value}</Text>{detail ? <Text style={styles.infoDetail}>{detail}</Text> : null}</View>;
 }
 
 const styles = StyleSheet.create({
-  centerState: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-    gap: 12,
-  },
-  scrollContent: {
-    padding: 16,
-    gap: 12,
-  },
-  headerCard: {
-    borderWidth: 1,
-    borderRadius: 16,
-    padding: 16,
-    shadowColor: "#000000",
-    shadowOpacity: 0.07,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-    gap: 10,
-  },
-  eyebrow: {
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: "700",
-  },
-  heroRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  heroText: {
-    flex: 1,
-  },
-  weatherIcon: {
-    fontSize: 44,
-    width: 52,
-    textAlign: "center",
-  },
-  temp: {
-    fontSize: 40,
-    fontWeight: "700",
-    color: "#2c6fb7",
-  },
-  subtitle: {
-    fontSize: 14,
-    textTransform: "capitalize",
-    color: "#1f3550",
-  },
-  headerMetaRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-  },
-  frostRiskBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-  },
-  frostRiskHigh: {
-    backgroundColor: "#ffebee",
-    borderLeftWidth: 3,
-    borderLeftColor: "#c62828",
-  },
-  frostRiskModerate: {
-    backgroundColor: "#fff3e0",
-    borderLeftWidth: 3,
-    borderLeftColor: "#f57c00",
-  },
-  frostRiskLow: {
-    backgroundColor: "#e8f5e9",
-    borderLeftWidth: 3,
-    borderLeftColor: "#2e7d32",
-  },
-  frostRiskText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#1f3550",
-  },
-  metaText: {
-    fontSize: 12,
-  },
-  refreshButton: {
-    backgroundColor: "#16324f",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-  },
-  refreshButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
-  },
-  recommendationCard: {
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#dce5ef",
-    borderRadius: 14,
-    padding: 14,
-    gap: 10,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: "#1f3550",
-  },
-  recommendationRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  recommendationPill: {
-    flex: 1,
-    borderRadius: 10,
-    backgroundColor: "#eef4fb",
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  recommendationPillLabel: {
-    color: "#4f6478",
-    fontSize: 11,
-    fontWeight: "700",
-    textTransform: "uppercase",
-  },
-  recommendationPillValue: {
-    color: "#16324f",
-    fontWeight: "700",
-    fontSize: 22,
-    marginTop: 2,
-  },
-  recommendationCurrent: {
-    color: "#36506a",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  recommendationZero: {
-    color: "#1f3550",
-    fontSize: 12,
-    fontWeight: "700",
-    backgroundColor: "#e8f5e9",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderLeftWidth: 3,
-    borderLeftColor: "#2e7d32",
-  },
-  recommendationReason: {
-    color: "#1f3550",
-    fontSize: 12,
-    lineHeight: 16,
-    fontWeight: "600",
-    backgroundColor: "#eef4fb",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderLeftWidth: 3,
-    borderLeftColor: "#2c6fb7",
-  },
-  manualMixBlock: {
-    gap: 8,
-  },
-  manualMixLabel: {
-    color: "#36506a",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  manualMixRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-  },
-  manualMixField: {
-    flex: 1,
-    gap: 4,
-  },
-  manualMixFieldLabel: {
-    color: "#63788e",
-    fontSize: 14,
-    fontWeight: "700",
-    textTransform: "uppercase",
-  },
-  manualMixInput: {
-    minHeight: 50,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#cfd9e4",
-    backgroundColor: "#fbfcfe",
-    paddingHorizontal: 12,
-    color: "#16324f",
-    fontSize: 22,
-    fontWeight: "700",
-  },
-  manualMixButton: {
-    minWidth: 68,
-    minHeight: 50,
-    borderRadius: 10,
-    backgroundColor: "#2c6fb7",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 14,
-  },
-  manualMixButtonText: {
-    color: "#ffffff",
-    fontSize: 18,
-    fontWeight: "700",
-  },
-  applyButton: {
-    borderRadius: 10,
-    backgroundColor: "#1e6d4f",
-    minHeight: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  applyButtonDone: {
-    backgroundColor: "#2c6fb7",
-  },
-  applyButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
-  },
-  gridRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  infoCard: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#dce5ef",
-    borderRadius: 14,
-    padding: 14,
-    gap: 4,
-  },
-  infoLabel: {
-    fontSize: 12,
-    color: "#63788e",
-    textTransform: "uppercase",
-    fontWeight: "700",
-  },
-  infoValue: {
-    fontSize: 20,
-    color: "#1f3550",
-    fontWeight: "700",
-  },
-  infoDetail: {
-    color: "#4e647a",
-    fontSize: 12,
-  },
-  error: {
-    color: "#b63d3d",
-    fontSize: 16,
-    textAlign: "center",
-  },
+  centerState: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20, gap: 12, backgroundColor: "#f3f5f8" },
+  scrollContent: { padding: 16, gap: 12, backgroundColor: "#f3f5f8" },
+  card: { backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 16, padding: 16, gap: 10, shadowColor: "#000", shadowOpacity: 0.07, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  eyebrow: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", color: "#63788e" },
+  title: { fontSize: 24, fontWeight: "700", color: "#16324f" },
+  heroRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  heroText: { flex: 1 },
+  temp: { fontSize: 40, fontWeight: "700", color: "#2c6fb7" },
+  subtitle: { fontSize: 14, textTransform: "capitalize", color: "#1f3550" },
+  headerMetaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
+  metaText: { fontSize: 12, color: "#63788e" },
+  refreshButton: { backgroundColor: "#16324f", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9 },
+  refreshButtonText: { color: "#fff", fontWeight: "700" },
+  sectionTitle: { fontSize: 17, fontWeight: "700", color: "#1f3550" },
+  row: { flexDirection: "row", gap: 10 },
+  pill: { flex: 1, borderRadius: 10, backgroundColor: "#eef4fb", paddingVertical: 8, paddingHorizontal: 10 },
+  pillLabel: { color: "#4f6478", fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
+  pillValue: { color: "#16324f", fontWeight: "700", fontSize: 22, marginTop: 2 },
+  callout: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderLeftWidth: 3 },
+  calloutText: { color: "#1f3550", fontSize: 12, fontWeight: "700" },
+  badgeLow: { backgroundColor: "#e8f5e9", borderLeftColor: "#2e7d32" },
+  badgeModerate: { backgroundColor: "#fff3e0", borderLeftColor: "#f57c00" },
+  badgeHigh: { backgroundColor: "#ffebee", borderLeftColor: "#c62828" },
+  badgeBlue: { backgroundColor: "#eef4fb", borderLeftColor: "#2c6fb7" },
+  currentText: { color: "#36506a", fontSize: 14, fontWeight: "700" },
+  manualLabel: { color: "#36506a", fontSize: 14, fontWeight: "700" },
+  manualRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
+  manualField: { flex: 1, gap: 4 },
+  manualFieldLabel: { color: "#63788e", fontSize: 14, fontWeight: "700", textTransform: "uppercase" },
+  manualInput: { minHeight: 50, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 22, fontWeight: "700" },
+  manualButton: { minWidth: 68, minHeight: 50, borderRadius: 10, backgroundColor: "#2c6fb7", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
+  manualButtonText: { color: "#fff", fontSize: 18, fontWeight: "700" },
+  applyButton: { borderRadius: 10, backgroundColor: "#1e6d4f", minHeight: 40, alignItems: "center", justifyContent: "center" },
+  applyButtonDone: { backgroundColor: "#2c6fb7" },
+  applyButtonText: { color: "#fff", fontWeight: "700" },
+  schedulePrimary: { color: "#16324f", fontSize: 16, fontWeight: "700" },
+  scheduleMeta: { color: "#4f6478", fontSize: 12, lineHeight: 17 },
+  lookAheadHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
+  lookAheadTitle: { color: "#36506a", fontSize: 14, fontWeight: "700" },
+  lookAheadToggle: { minHeight: 32, borderRadius: 999, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, alignItems: "center", justifyContent: "center" },
+  lookAheadToggleText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
+  lookAheadMenu: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  lookAheadMenuButton: { borderRadius: 999, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, paddingVertical: 8 },
+  lookAheadMenuButtonActive: { backgroundColor: "#2c6fb7", borderColor: "#2c6fb7" },
+  lookAheadMenuText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
+  lookAheadMenuTextActive: { color: "#ffffff" },
+  lookAheadList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  lookAheadCard: { width: "48%", borderRadius: 10, borderWidth: 1, borderColor: "#dce5ef", backgroundColor: "#fbfcfe", padding: 10, gap: 4 },
+  lookAheadLabel: { color: "#63788e", fontSize: 11, fontWeight: "700" },
+  lookAheadTemp: { color: "#1f3550", fontSize: 18, fontWeight: "700" },
+  lookAheadCondition: { color: "#4f6478", fontSize: 12, textTransform: "capitalize" },
+  lookAheadMix: { color: "#2c6fb7", fontSize: 12, fontWeight: "700" },
+  secondaryButton: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", alignItems: "center", justifyContent: "center", backgroundColor: "#fbfcfe" },
+  secondaryButtonText: { color: "#16324f", fontWeight: "700" },
+  primaryScheduleButton: { minHeight: 42, borderRadius: 10, backgroundColor: "#2c6fb7", alignItems: "center", justifyContent: "center" },
+  primaryScheduleButtonDisabled: { backgroundColor: "#9eabb8" },
+  primaryScheduleText: { color: "#fff", fontWeight: "700" },
+  infoCard: { flex: 1, backgroundColor: "#fff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 14, padding: 14, gap: 4 },
+  infoLabel: { fontSize: 12, color: "#63788e", textTransform: "uppercase", fontWeight: "700" },
+  infoValue: { fontSize: 20, color: "#1f3550", fontWeight: "700" },
+  infoDetail: { color: "#4e647a", fontSize: 12 },
+  error: { color: "#b63d3d", fontSize: 16, textAlign: "center" },
 });
