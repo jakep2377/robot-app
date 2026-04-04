@@ -5,6 +5,7 @@ import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOO
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getJson, postJson } from '../../lib/serverApi';
+import AppButton from '../common/AppButton';
 
 type RectangleSelection = {
   baseStation: LatLng;
@@ -441,16 +442,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             Salt {saltPct}% · Brine {brinePct}%
           </Text>
         </View>
-        <Pressable onPress={toggleMapType} style={styles.mapTypeAction}>
-          <View style={styles.modeChipRow}>
-            <Text style={styles.mapTypeActionText}>{mapType === 'standard' ? 'Satellite' : 'Standard'}</Text>
-            <MaterialCommunityIcons
-              name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
-              size={16}
-              color="#2c6fb7"
-            />
-          </View>
-        </Pressable>
+        <AppButton label={mapType === 'standard' ? 'Satellite' : 'Standard'} onPress={toggleMapType} variant="outline" style={styles.mapTypeAction}>
+          <MaterialCommunityIcons
+            name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
+            size={16}
+            color="#2c6fb7"
+          />
+        </AppButton>
       </View>
 
       <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
@@ -460,7 +458,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           <Text style={styles.pathMetaText}>Path: {plannedPath.length} points · {(plannedPathDistanceM / 1000).toFixed(2)} km · Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
         ) : null}
         <View style={styles.actionRow}>
-          <Pressable
+          <AppButton
+            label={drawingMode ? 'Drawing...' : 'Draw Area'}
             onPress={() => {
               setSelection(null);
               resetPlanningState();
@@ -468,11 +467,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               setFirstPoint(null);
               setMessage('Pick the first corner, then the opposite corner.');
             }}
+            variant="outline"
             style={styles.secondaryAction}
-          >
-            <Text style={styles.secondaryActionText}>{drawingMode ? 'Drawing...' : 'Draw Area'}</Text>
-          </Pressable>
-          <Pressable
+          />
+          <AppButton
+            label="Clear"
             onPress={() => {
               setSelection(null);
               resetPlanningState();
@@ -480,39 +479,34 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               setDrawingMode(false);
               setMessage('Area cleared.');
             }}
+            variant="outline"
             style={styles.secondaryAction}
-          >
-            <Text style={styles.secondaryActionText}>Clear</Text>
-          </Pressable>
+          />
         </View>
 
         <View style={styles.actionRow}>
-          <Pressable
+          <AppButton
+            label={busy === 'area' ? 'Submitting Area...' : areaSubmitted ? 'Area Submitted' : 'Submit Area'}
             onPress={submitArea}
             disabled={!selection || busy !== null}
+            variant={!selection || busy !== null ? 'primary' : areaSubmitted ? 'success' : 'success'}
             style={[
               styles.statefulButton,
               styles.actionFill,
               !selection || busy !== null ? styles.buttonDisabled : areaSubmitted ? styles.buttonDone : styles.buttonReady,
             ]}
-          >
-            <Text style={styles.statefulButtonText}>
-              {busy === 'area' ? 'Submitting Area...' : areaSubmitted ? 'Area Submitted' : 'Submit Area'}
-            </Text>
-          </Pressable>
-          <Pressable
+          />
+          <AppButton
+            label={busy === 'path' ? 'Planning Path...' : 'Plan Path'}
             onPress={planPath}
             disabled={!selection || !areaSubmitted || busy !== null}
+            variant="primary"
             style={[
               styles.statefulButton,
               styles.actionFill,
               !selection || !areaSubmitted || busy !== null ? styles.buttonDisabled : styles.buttonPlan,
             ]}
-          >
-            <Text style={styles.statefulButtonText}>
-              {busy === 'path' ? 'Planning Path...' : 'Plan Path'}
-            </Text>
-          </Pressable>
+          />
         </View>
       </View>
     </View>
@@ -574,19 +568,8 @@ const styles = StyleSheet.create({
   },
   mapTypeAction: {
     minHeight: 40,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#d9e4f0',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 10,
     minWidth: 0,
-  },
-  mapTypeActionText: {
-    color: '#35506a',
-    fontWeight: '700',
-    fontSize: 12,
+    paddingHorizontal: 12,
   },
   modeChipText: {
     fontSize: 12,
@@ -625,16 +608,6 @@ const styles = StyleSheet.create({
   secondaryAction: {
     flex: 1,
     minHeight: 38,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#b8c5d3',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#f7fafc',
-  },
-  secondaryActionText: {
-    color: '#1f3550',
-    fontWeight: '700',
   },
   pathMetaText: {
     color: '#1f5f9f',
@@ -653,15 +626,7 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   statefulButton: {
-    borderRadius: 10,
     minHeight: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-  },
-  statefulButtonText: {
-    color: '#ffffff',
-    fontWeight: '700',
   },
   buttonReady: {
     backgroundColor: '#2d8a65',

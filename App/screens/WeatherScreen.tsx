@@ -2,6 +2,15 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import AppButton from "../components/common/AppButton";
+import AppCard from "../components/common/AppCard";
+import {
+  formatForecastLabel,
+  formatShiftedDayKey,
+  formatShiftedDayLabel,
+  resolveScheduledUnix,
+} from "../lib/weatherScheduling";
+import { buildWorkbookMix, frostRisk, type Mix } from "../lib/treatmentRules";
 
 type WeatherPayload = {
   name: string;
@@ -36,10 +45,9 @@ type Props = {
   setBrinePct: (value: number) => void;
 };
 
-type Mix = { saltPct: number; brinePct: number; reason: string };
 type LocationState = { latitude: number; longitude: number; label: string; source: "city" | "phone" };
-type ScheduleSuggestion = { at: number; label: string; notifyAt: Date; mix: Mix; condition: string } | null;
-type LookAheadItem = { label: string; tempText: string; condition: string; mixText: string };
+type ScheduleTarget = { at: number; label: string; mix: Mix; condition: string } | null;
+type LookAheadItem = { at: number; label: string; tempText: string; condition: string; mixText: string; mix: Mix };
 type LookAheadDay = { key: string; label: string; items: LookAheadItem[] };
 
 const API_KEY = "e324705094164f5dc98161647cccc83a";
@@ -55,33 +63,6 @@ const formatLocalTime = (unixSeconds?: number, timezoneSeconds?: number) => {
   return `${date.getUTCHours().toString().padStart(2, "0")}:${date.getUTCMinutes().toString().padStart(2, "0")}`;
 };
 
-const getShiftedDate = (unixSeconds: number, timezoneSeconds?: number) =>
-  new Date((unixSeconds + (timezoneSeconds ?? 0)) * 1000);
-
-const formatForecastLabel = (unixSeconds: number, timezoneSeconds?: number) =>
-  getShiftedDate(unixSeconds, timezoneSeconds).toLocaleString("en-US", {
-    weekday: "short",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: "UTC",
-  });
-
-const formatShiftedDayKey = (unixSeconds: number, timezoneSeconds?: number) => {
-  const shifted = getShiftedDate(unixSeconds, timezoneSeconds);
-  const year = shifted.getUTCFullYear();
-  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(shifted.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
-
-const formatShiftedDayLabel = (unixSeconds: number, timezoneSeconds?: number) =>
-  getShiftedDate(unixSeconds, timezoneSeconds).toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-
 function getWeatherIconName(condition: string) {
   const text = condition.toLowerCase();
   if (/clear|sunny/.test(text)) return "weather-sunny";
@@ -91,38 +72,6 @@ function getWeatherIconName(condition: string) {
   if (/snow|sleet|ice|freezing/.test(text)) return "weather-snowy";
   if (/mist|fog/.test(text)) return "weather-fog";
   return "weather-partly-cloudy";
-}
-
-function frostRisk(tempF: number, humidity: number) {
-  const tempC = (tempF - 32) * (5 / 9);
-  const dewPointC = (237.7 * (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100))) / (17.27 - (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100)));
-  const dewPointF = (dewPointC * 9) / 5 + 32;
-  const spreadF = tempF - dewPointF;
-  if (tempF <= 32 && dewPointF <= 32) return { level: "high", text: "Frost likely" };
-  if (tempF <= 35 && spreadF < 3) return { level: "moderate", text: "Frost risk rising" };
-  if (tempF > 45 || spreadF > 8) return { level: "low", text: "Low frost risk" };
-  return { level: "moderate", text: "Monitor conditions" };
-}
-
-function buildMix(tempF: number, humidity: number, conditionText: string, precipInches: number, windSpeed: number, windGust: number): Mix {
-  const snowOrIce = /snow|sleet|freezing|ice/.test(conditionText);
-  const rain = /rain|drizzle|shower|thunder/.test(conditionText);
-  const frost = frostRisk(tempF, humidity);
-  let salt = 70;
-  let brine = 80;
-  if (tempF <= 15) { salt = 100; brine = 35; }
-  else if (tempF <= 25) { salt = 90; brine = 55; }
-  else if (tempF <= 32) { salt = 75; brine = 80; }
-  else { salt = 45; brine = 100; }
-  if (frost.level === "low" && !snowOrIce && !rain && tempF >= 38 && humidity < 85 && precipInches < 0.02) {
-    return { saltPct: 0, brinePct: 0, reason: "No dispersion recommended" };
-  }
-  const reasons = [`Base from ${Math.round(tempF)} F`];
-  if (snowOrIce) { salt = Math.max(salt, 95); brine = Math.min(brine, 60); reasons.push("snow or ice"); }
-  else if (rain) { brine = Math.max(brine, 90); salt = Math.min(salt, 70); reasons.push("rain"); }
-  if (precipInches >= 0.08 && tempF <= 32) { salt = Math.min(100, salt + 8); reasons.push("higher precip"); }
-  if (windSpeed >= 20 || windGust >= 28) { salt = Math.min(100, salt + 5); reasons.push("strong wind"); }
-  return { saltPct: clampPct(salt), brinePct: clampPct(brine), reason: reasons.join(" | ") };
 }
 
 function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
@@ -175,6 +124,9 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
   const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
   const [selectedLookAheadDay, setSelectedLookAheadDay] = useState("");
+  const [selectedLookAheadAt, setSelectedLookAheadAt] = useState<number | null>(null);
+  const [customTimeText, setCustomTimeText] = useState("");
+  const [manualScheduleTarget, setManualScheduleTarget] = useState<ScheduleTarget>(null);
   const [showLookAhead, setShowLookAhead] = useState(false);
 
   const loadWeather = async (location: LocationState) => {
@@ -202,10 +154,10 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
 
   const currentMix = useMemo(() => {
     if (!weather) return null;
-    return buildMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0);
+    return buildWorkbookMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0);
   }, [weather]);
 
-  const suggestion = useMemo<ScheduleSuggestion>(() => {
+  const suggestion = useMemo<ScheduleTarget>(() => {
     if (!forecast?.list?.length) return null;
     const timezone = forecast.city?.timezone ?? weather?.timezone;
     const now = Math.floor(Date.now() / 1000);
@@ -213,7 +165,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       .filter((entry) => entry.dt >= now && entry.dt <= now + 36 * 3600)
       .map((entry) => {
         const condition = `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase();
-        const mix = buildMix(entry.main.temp, entry.main.humidity, condition, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0);
+        const mix = buildWorkbookMix(entry.main.temp, entry.main.humidity, condition, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0);
         return { entry, mix, condition, score: scoreForecast(entry.main.temp, condition, entry.main.humidity, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0, mix) };
       })
       .sort((a, b) => b.score - a.score || a.entry.dt - b.entry.dt)[0];
@@ -221,7 +173,6 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     return {
       at: best.entry.dt,
       label: formatForecastLabel(best.entry.dt, timezone),
-      notifyAt: new Date(Math.max(Date.now() + 60_000, best.entry.dt * 1000 - 30 * 60 * 1000)),
       mix: best.mix,
       condition: best.entry.weather?.[0]?.description ?? "forecast update",
     };
@@ -234,7 +185,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
 
     forecast.list.forEach((entry) => {
       const condition = entry.weather?.[0]?.description ?? "Forecast update";
-      const mix = buildMix(
+      const mix = buildWorkbookMix(
         entry.main.temp,
         entry.main.humidity,
         `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase(),
@@ -245,10 +196,12 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       const dayKey = formatShiftedDayKey(entry.dt, timezone);
       const dayLabel = formatShiftedDayLabel(entry.dt, timezone);
       const nextItem: LookAheadItem = {
+        at: entry.dt,
         label: formatForecastLabel(entry.dt, timezone),
         tempText: `${Math.round(entry.main.temp)}°F`,
         condition,
         mixText: `${mix.saltPct}% / ${mix.brinePct}%`,
+        mix,
       };
 
       if (grouped.has(dayKey)) {
@@ -270,28 +223,6 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       setSelectedLookAheadDay(lookAheadDays[0].key);
     }
   }, [lookAheadDays, selectedLookAheadDay]);
-
-  const lookAheadLegacy = useMemo<LookAheadItem[]>(() => {
-    if (!forecast?.list?.length) return [];
-    const timezone = forecast.city?.timezone ?? weather?.timezone;
-    return forecast.list.slice(0, 4).map((entry) => {
-      const condition = entry.weather?.[0]?.description ?? "Forecast update";
-      const mix = buildMix(
-        entry.main.temp,
-        entry.main.humidity,
-        `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase(),
-        getPrecipInches(entry),
-        entry.wind?.speed ?? 0,
-        entry.wind?.gust ?? 0,
-      );
-      return {
-        label: formatForecastLabel(entry.dt, timezone),
-        tempText: `${Math.round(entry.main.temp)}°F`,
-        condition,
-        mixText: `${mix.saltPct}% / ${mix.brinePct}%`,
-      };
-    });
-  }, [forecast, weather?.timezone]);
 
   const usePhoneLocation = async () => {
     setLocating(true);
@@ -352,9 +283,68 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     return true;
   };
 
+  const applyCustomScheduleTime = () => {
+    const match = customTimeText.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+      Alert.alert("Enter Time", "Use HH:MM for the selected day.");
+      return;
+    }
+
+    const hours = Number.parseInt(match[1], 10);
+    const minutes = Number.parseInt(match[2], 10);
+    if (hours > 23 || minutes > 59) {
+      Alert.alert("Invalid Time", "Use a valid 24-hour time like 06:30 or 18:45.");
+      return;
+    }
+
+    const dayKey = selectedLookAheadDay || lookAheadDays[0]?.key;
+    if (!dayKey) {
+      Alert.alert("No Forecast Day", "Load the forecast first, then choose a time.");
+      return;
+    }
+
+    const timezone = forecast?.city?.timezone ?? weather?.timezone ?? 0;
+    const scheduledAt = resolveScheduledUnix(dayKey, `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`, timezone);
+    if (scheduledAt == null) {
+      Alert.alert("Invalid Time", "Use a valid 24-hour time like 06:30 or 18:45.");
+      return;
+    }
+    if (scheduledAt <= Math.floor(Date.now() / 1000)) {
+      Alert.alert("Pick A Future Time", "Choose a time that has not already passed.");
+      return;
+    }
+
+    const closestEntry = forecast?.list?.reduce((closest, entry) =>
+      Math.abs(entry.dt - scheduledAt) < Math.abs(closest.dt - scheduledAt) ? entry : closest
+    );
+    if (!closestEntry) {
+      Alert.alert("No Forecast Data", "There is no forecast data available for that time yet.");
+      return;
+    }
+
+    const condition = closestEntry.weather?.[0]?.description ?? "forecast update";
+    const mix = buildWorkbookMix(
+      closestEntry.main.temp,
+      closestEntry.main.humidity,
+      `${closestEntry.weather?.[0]?.main ?? ""} ${closestEntry.weather?.[0]?.description ?? ""}`.toLowerCase(),
+      getPrecipInches(closestEntry),
+      closestEntry.wind?.speed ?? 0,
+      closestEntry.wind?.gust ?? 0,
+    );
+
+    setSelectedLookAheadAt(null);
+    setManualScheduleTarget({
+      at: scheduledAt,
+      label: formatForecastLabel(scheduledAt, timezone),
+      mix,
+      condition,
+    });
+  };
+
   const scheduleAlert = async () => {
-    if (!suggestion) {
-      Alert.alert("No Suggested Window", "There is no recommended operating window in the next 36 hours.");
+    const target = selectedLookAheadTarget ?? manualScheduleTarget ?? suggestion;
+    if (!target) {
+      Alert.alert("No Service Time", "Choose a forecast time or set a manual time first.");
       return;
     }
     if (activeLocation.source !== "phone") {
@@ -371,19 +361,20 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     }
     const ok = await enableAlerts();
     if (!ok) return;
+    const notifyAt = new Date(Math.max(Date.now() + 60_000, target.at * 1000 - 30 * 60 * 1000));
     await Notifications.cancelAllScheduledNotificationsAsync();
     await Notifications.scheduleNotificationAsync({
       content: {
         title: "Weather operating window",
-        body: `${suggestion.label}: Salt ${suggestion.mix.saltPct}% | Brine ${suggestion.mix.brinePct}%`,
+        body: `${target.label}: Salt ${target.mix.saltPct}% | Brine ${target.mix.brinePct}%`,
       },
-      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: suggestion.notifyAt, channelId: "weather-scheduler" },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: notifyAt, channelId: "weather-scheduler" },
     });
-    setScheduledAlertText(`Alert set for ${suggestion.notifyAt.toLocaleString()}`);
+    setScheduledAlertText(`Alert set for ${notifyAt.toLocaleString()}`);
   };
 
   if (loading) return <View style={[styles.centerState, { paddingTop: insets.top }]}><ActivityIndicator size="large" /><Text style={styles.metaText}>Loading weather...</Text></View>;
-  if (error || !weather || !currentMix) return <View style={[styles.centerState, { paddingTop: insets.top }]}><Text style={styles.error}>Error: {error ?? "Weather unavailable"}</Text><Pressable style={styles.refreshButton} onPress={() => loadWeather(activeLocation)}><Text style={styles.refreshButtonText}>Retry</Text></Pressable></View>;
+  if (error || !weather || !currentMix) return <View style={[styles.centerState, { paddingTop: insets.top }]}><Text style={styles.error}>Error: {error ?? "Weather unavailable"}</Text><AppButton label="Retry" onPress={() => loadWeather(activeLocation)} variant="secondary" /></View>;
 
   const frost = frostRisk(weather.main.temp, weather.main.humidity);
   const currentApplied = clampPct(saltPct) === currentMix.saltPct && clampPct(brinePct) === currentMix.brinePct;
@@ -392,10 +383,12 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const weatherIcon = getWeatherIconName(weather.weather?.[0]?.description ?? "");
   const badgeStyle = frost.level === "high" ? styles.badgeHigh : frost.level === "moderate" ? styles.badgeModerate : styles.badgeLow;
   const activeLookAheadDay = lookAheadDays.find((day) => day.key === selectedLookAheadDay) ?? lookAheadDays[0] ?? null;
+  const selectedLookAheadTarget = lookAheadDays.flatMap((day) => day.items).find((item) => item.at === selectedLookAheadAt) ?? null;
+  const scheduleTarget = selectedLookAheadTarget ?? manualScheduleTarget ?? suggestion;
 
   return (
     <ScrollView contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 8 }]}>
-      <View style={styles.card}>
+      <AppCard style={styles.card}>
         <Text style={styles.eyebrow}>Weather</Text>
         <Text style={styles.title}>{activeLocation.label}</Text>
         <View style={styles.heroRow}>
@@ -408,12 +401,11 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
         <View style={[styles.callout, badgeStyle]}><Text style={styles.calloutText}>{frost.text}</Text></View>
         <View style={styles.headerMetaRow}>
           <Text style={styles.metaText}>Updated {formatLocalTime(weather.dt, weather.timezone)}</Text>
-          <Pressable style={styles.refreshButton} onPress={() => loadWeather(activeLocation)}><Text style={styles.refreshButtonText}>Refresh</Text></Pressable>
+          <AppButton label="Refresh" onPress={() => loadWeather(activeLocation)} variant="secondary" />
         </View>
-      </View>
+      </AppCard>
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Recommended Mix</Text>
+      <AppCard title="Recommended Mix" style={styles.card}>
         <View style={styles.row}>
           <ValuePill label="Salt" value={`${currentMix.saltPct}%`} />
           <ValuePill label="Brine" value={`${currentMix.brinePct}%`} />
@@ -424,53 +416,80 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
         <View style={styles.manualRow}>
           <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Salt</Text><TextInput style={styles.manualInput} value={manualSaltText} onChangeText={(text) => setManualSaltText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
           <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Brine</Text><TextInput style={styles.manualInput} value={manualBrineText} onChangeText={(text) => setManualBrineText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
-          <Pressable style={styles.manualButton} onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }}><Text style={styles.manualButtonText}>Set</Text></Pressable>
+          <AppButton label="Set" onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }} style={styles.manualButton} />
         </View>
         <Text style={[styles.callout, styles.badgeBlue, styles.calloutText]}>{currentMix.reason}</Text>
-        <Pressable style={[styles.applyButton, currentApplied ? styles.applyButtonDone : null]} onPress={() => { setSaltPct(currentMix.saltPct); setBrinePct(currentMix.brinePct); }}><Text style={styles.applyButtonText}>{currentApplied ? "Applied" : "Apply Recommendation"}</Text></Pressable>
-      </View>
+        <AppButton
+          label={currentApplied ? "Applied" : "Apply Recommendation"}
+          onPress={() => { setSaltPct(currentMix.saltPct); setBrinePct(currentMix.brinePct); }}
+          variant={currentApplied ? "primary" : "success"}
+          style={[styles.applyButton, currentApplied ? styles.applyButtonDone : null]}
+        />
+      </AppCard>
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Scheduling Mode</Text>
+      <AppCard title="Scheduling Mode" style={styles.card}>
         <Text style={styles.metaText}>Source: {activeLocation.source === "phone" ? "Phone location" : "City fallback"}</Text>
-        <Text style={styles.schedulePrimary}>{suggestion ? `Potential event: ${suggestion.label}` : "No potential event in the next 36 hours."}</Text>
-        <Text style={styles.scheduleMeta}>{suggestion ? `Mix ${suggestion.mix.saltPct}% salt | ${suggestion.mix.brinePct}% brine | ${suggestion.condition}` : "The forecast is mild enough that no operation is suggested right now."}</Text>
+        <Text style={styles.schedulePrimary}>{scheduleTarget ? `Service time: ${scheduleTarget.label}` : "No potential event in the next 36 hours."}</Text>
+        <Text style={styles.scheduleMeta}>{scheduleTarget ? `Mix ${scheduleTarget.mix.saltPct}% salt | ${scheduleTarget.mix.brinePct}% brine | ${scheduleTarget.condition}` : "The forecast is mild enough that no operation is suggested right now."}</Text>
         <Text style={styles.scheduleMeta}>{notificationState}</Text>
         <Text style={styles.scheduleMeta}>{scheduledAlertText}</Text>
         <View style={styles.lookAheadHeader}>
           <Text style={styles.lookAheadTitle}>Look Ahead</Text>
-          <Pressable style={styles.lookAheadToggle} onPress={() => setShowLookAhead((value) => !value)}>
-            <Text style={styles.lookAheadToggleText}>{showLookAhead ? "Hide" : "Show"}</Text>
-          </Pressable>
+          <AppButton label={showLookAhead ? "Hide" : "Show"} onPress={() => setShowLookAhead((value) => !value)} variant="outline" compact style={styles.lookAheadToggle} />
         </View>
         {showLookAhead ? (
           <>
             <View style={styles.lookAheadMenu}>
               {lookAheadDays.map((day) => (
-                <Pressable
+                <AppButton
                   key={day.key}
-                  style={[styles.lookAheadMenuButton, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuButtonActive : null]}
+                  label={day.label}
                   onPress={() => setSelectedLookAheadDay(day.key)}
-                >
-                  <Text style={[styles.lookAheadMenuText, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuTextActive : null]}>{day.label}</Text>
-                </Pressable>
+                  variant={day.key === activeLookAheadDay?.key ? "primary" : "outline"}
+                  compact
+                  style={[styles.lookAheadMenuButton, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuButtonActive : null]}
+                  textStyle={[styles.lookAheadMenuText, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuTextActive : null]}
+                />
               ))}
             </View>
             <View style={styles.lookAheadList}>
               {activeLookAheadDay?.items.map((item) => (
-                <View key={`${activeLookAheadDay.key}-${item.label}`} style={styles.lookAheadCard}>
-                  <Text style={styles.lookAheadLabel}>{item.label}</Text>
-                  <Text style={styles.lookAheadTemp}>{item.tempText}</Text>
-                  <Text style={styles.lookAheadCondition}>{item.condition}</Text>
-                  <Text style={styles.lookAheadMix}>{item.mixText}</Text>
-                </View>
+                <AppButton
+                  key={`${activeLookAheadDay.key}-${item.label}`}
+                  label=""
+                  style={[styles.lookAheadCard, item.at === selectedLookAheadAt ? styles.lookAheadCardActive : null]}
+                  onPress={() => {
+                    setSelectedLookAheadAt(item.at);
+                    setManualScheduleTarget(null);
+                  }}
+                >
+                  <View>
+                    <Text style={styles.lookAheadLabel}>{item.label}</Text>
+                    <Text style={styles.lookAheadTemp}>{item.tempText}</Text>
+                    <Text style={styles.lookAheadCondition}>{item.condition}</Text>
+                    <Text style={styles.lookAheadMix}>{item.mixText}</Text>
+                  </View>
+                </AppButton>
               ))}
             </View>
           </>
         ) : null}
-        <Pressable style={styles.secondaryButton} onPress={usePhoneLocation}><Text style={styles.secondaryButtonText}>{locating ? "Locating..." : "Refresh From Phone Location"}</Text></Pressable>
-        <Pressable style={[styles.primaryScheduleButton, !suggestion ? styles.primaryScheduleButtonDisabled : null]} onPress={scheduleAlert} disabled={!suggestion}><Text style={styles.primaryScheduleText}>Schedule Service</Text></Pressable>
-      </View>
+        <Text style={styles.scheduleMeta}>Tap a forecast time or enter a manual run time for the selected day.</Text>
+        <View style={styles.manualScheduleRow}>
+          <TextInput
+            style={styles.manualScheduleInput}
+            value={customTimeText}
+            onChangeText={(text) => setCustomTimeText(text.replace(/[^0-9:]/g, "").slice(0, 5))}
+            placeholder="HH:MM"
+            placeholderTextColor="#8aa0b6"
+            keyboardType="numbers-and-punctuation"
+            maxLength={5}
+          />
+          <AppButton label="Use Time" onPress={applyCustomScheduleTime} variant="secondary" style={styles.manualScheduleButton} />
+        </View>
+        <AppButton label={locating ? "Locating..." : "Refresh From Phone Location"} onPress={usePhoneLocation} variant="outline" style={styles.secondaryButton} />
+        <AppButton label="Schedule Service" onPress={scheduleAlert} disabled={!scheduleTarget} style={[styles.primaryScheduleButton, !scheduleTarget ? styles.primaryScheduleButtonDisabled : null]} />
+      </AppCard>
 
       <View style={styles.row}><InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} /><InfoCard label="Humidity" value={`${weather.main.humidity}%`} /></View>
       <View style={styles.row}><InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} /><InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} /></View>
@@ -492,7 +511,7 @@ function InfoCard({ label, value, detail }: { label: string; value: string; deta
 const styles = StyleSheet.create({
   centerState: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20, gap: 12, backgroundColor: "#f3f5f8" },
   scrollContent: { padding: 16, gap: 12, backgroundColor: "#f3f5f8" },
-  card: { backgroundColor: "#ffffff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 16, padding: 16, gap: 10, shadowColor: "#000", shadowOpacity: 0.07, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
+  card: {},
   eyebrow: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", color: "#63788e" },
   title: { fontSize: 24, fontWeight: "700", color: "#16324f" },
   heroRow: { flexDirection: "row", alignItems: "center", gap: 12 },
@@ -501,8 +520,6 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 14, textTransform: "capitalize", color: "#1f3550" },
   headerMetaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
   metaText: { fontSize: 12, color: "#63788e" },
-  refreshButton: { backgroundColor: "#16324f", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 9 },
-  refreshButtonText: { color: "#fff", fontWeight: "700" },
   sectionTitle: { fontSize: 17, fontWeight: "700", color: "#1f3550" },
   row: { flexDirection: "row", gap: 10 },
   pill: { flex: 1, borderRadius: 10, backgroundColor: "#eef4fb", paddingVertical: 8, paddingHorizontal: 10 },
@@ -520,33 +537,32 @@ const styles = StyleSheet.create({
   manualField: { flex: 1, gap: 4 },
   manualFieldLabel: { color: "#63788e", fontSize: 14, fontWeight: "700", textTransform: "uppercase" },
   manualInput: { minHeight: 50, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 22, fontWeight: "700" },
-  manualButton: { minWidth: 68, minHeight: 50, borderRadius: 10, backgroundColor: "#2c6fb7", alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
-  manualButtonText: { color: "#fff", fontSize: 18, fontWeight: "700" },
-  applyButton: { borderRadius: 10, backgroundColor: "#1e6d4f", minHeight: 40, alignItems: "center", justifyContent: "center" },
+  manualButton: { minWidth: 68, minHeight: 50 },
+  applyButton: { minHeight: 40 },
   applyButtonDone: { backgroundColor: "#2c6fb7" },
-  applyButtonText: { color: "#fff", fontWeight: "700" },
   schedulePrimary: { color: "#16324f", fontSize: 16, fontWeight: "700" },
   scheduleMeta: { color: "#4f6478", fontSize: 12, lineHeight: 17 },
   lookAheadHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
   lookAheadTitle: { color: "#36506a", fontSize: 14, fontWeight: "700" },
-  lookAheadToggle: { minHeight: 32, borderRadius: 999, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, alignItems: "center", justifyContent: "center" },
-  lookAheadToggleText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
+  lookAheadToggle: { minHeight: 32, paddingHorizontal: 12 },
   lookAheadMenu: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  lookAheadMenuButton: { borderRadius: 999, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, paddingVertical: 8 },
+  lookAheadMenuButton: { minHeight: 34, paddingHorizontal: 12 },
   lookAheadMenuButtonActive: { backgroundColor: "#2c6fb7", borderColor: "#2c6fb7" },
   lookAheadMenuText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
   lookAheadMenuTextActive: { color: "#ffffff" },
   lookAheadList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  lookAheadCard: { width: "48%", borderRadius: 10, borderWidth: 1, borderColor: "#dce5ef", backgroundColor: "#fbfcfe", padding: 10, gap: 4 },
+  lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10 },
+  lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#eef4fb" },
   lookAheadLabel: { color: "#63788e", fontSize: 11, fontWeight: "700" },
   lookAheadTemp: { color: "#1f3550", fontSize: 18, fontWeight: "700" },
   lookAheadCondition: { color: "#4f6478", fontSize: 12, textTransform: "capitalize" },
   lookAheadMix: { color: "#2c6fb7", fontSize: 12, fontWeight: "700" },
-  secondaryButton: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", alignItems: "center", justifyContent: "center", backgroundColor: "#fbfcfe" },
-  secondaryButtonText: { color: "#16324f", fontWeight: "700" },
-  primaryScheduleButton: { minHeight: 42, borderRadius: 10, backgroundColor: "#2c6fb7", alignItems: "center", justifyContent: "center" },
+  manualScheduleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  manualScheduleInput: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 16, fontWeight: "700" },
+  manualScheduleButton: { minWidth: 96, minHeight: 42 },
+  secondaryButton: { minHeight: 42 },
+  primaryScheduleButton: { minHeight: 42 },
   primaryScheduleButtonDisabled: { backgroundColor: "#9eabb8" },
-  primaryScheduleText: { color: "#fff", fontWeight: "700" },
   infoCard: { flex: 1, backgroundColor: "#fff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 14, padding: 14, gap: 4 },
   infoLabel: { fontSize: 12, color: "#63788e", textTransform: "uppercase", fontWeight: "700" },
   infoValue: { fontSize: 20, color: "#1f3550", fontWeight: "700" },

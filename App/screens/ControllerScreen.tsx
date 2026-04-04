@@ -12,6 +12,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { getJson, getJsonAllowError, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
 import PercentSlider from "../components/common/PercentSlider";
+import AppButton from "../components/common/AppButton";
+import AppCard from "../components/common/AppCard";
 
 type AllowedAction = {
   id: string;
@@ -283,7 +285,7 @@ export default function ControllerScreen({
         </View>
       </View>
 
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Quick Status</Text>
         <View style={styles.quickGrid}>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
@@ -292,9 +294,9 @@ export default function ControllerScreen({
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Server</Text><Text style={[styles.quickValue, { color: theme.text }]}>{health?.ready ? "Ready" : "Not Ready"}</Text></View>
         </View>
         <Text style={[styles.metaText, { color: theme.muted }]}>Telemetry {health?.checks?.telemetry ? "OK" : "Stale"} | Bridge {health?.checks?.bridge ? "OK" : "Issue"} | Queue {status?.queue_depth ?? 0}</Text>
-      </View>
+      </AppCard>
 
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
         <View style={styles.missionActionGrid}>
           <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
@@ -312,12 +314,10 @@ export default function ControllerScreen({
         </View>
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Override</Text>
-        <Pressable style={styles.manualLauncher} onPress={() => setManualControlVisible(true)}>
-          <Text style={styles.manualLauncherText}>Open Manual Control</Text>
-        </Pressable>
-      </View>
+        <AppButton label="Open Manual Control" onPress={() => setManualControlVisible(true)} style={styles.manualLauncher} />
+      </AppCard>
 
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Dispersion</Text>
         <PercentSlider
           label="Salt"
@@ -332,9 +332,9 @@ export default function ControllerScreen({
           onChange={setBrinePct}
           accentColor="#2c6fb7"
         />
-      </View>
+      </AppCard>
 
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Alerts</Text>
         {latestAlert ? (
           <View style={[styles.alertRow, latestAlert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
@@ -344,9 +344,9 @@ export default function ControllerScreen({
         ) : (
           <Text style={[styles.metaText, { color: theme.muted }]}>No alerts.</Text>
         )}
-      </View>
+      </AppCard>
 
-      <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Field Notes</Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for handoff.</Text>
         <TextInput
@@ -357,9 +357,13 @@ export default function ControllerScreen({
           placeholderTextColor={theme.muted}
           multiline
         />
-        <Pressable style={styles.secondaryButton} onPress={submitNote} disabled={pendingAction === "note"}>
-          <Text style={styles.secondaryButtonText}>{pendingAction === "note" ? "Saving..." : "Save Note"}</Text>
-        </Pressable>
+        <AppButton
+          label={pendingAction === "note" ? "Saving..." : "Save Note"}
+          onPress={submitNote}
+          disabled={pendingAction === "note"}
+          variant="secondary"
+          style={styles.secondaryButton}
+        />
         {recentNotes.length ? (
           recentNotes.map((note) => (
             <View key={note.id} style={styles.noteRow}>
@@ -370,7 +374,7 @@ export default function ControllerScreen({
         ) : (
           <Text style={[styles.metaText, { color: theme.muted }]}>No notes.</Text>
         )}
-      </View>
+      </AppCard>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -436,18 +440,18 @@ function ActionButton({
   compact?: boolean;
 }) {
   return (
-    <Pressable
+    <AppButton
+      label={busy ? `${label}...` : label}
       onPress={onPress}
       disabled={disabled || busy}
+      variant={danger ? "danger" : "success"}
+      compact={compact}
       style={[
         styles.actionButton,
         compact ? styles.missionActionGridButton : null,
-        danger ? styles.actionDanger : null,
-        disabled || busy ? styles.actionDisabled : null,
       ]}
-    >
-      <Text style={styles.actionText}>{busy ? `${label}...` : label}</Text>
-    </Pressable>
+      textStyle={styles.actionText}
+    />
   );
 }
 
@@ -507,19 +511,7 @@ const styles = StyleSheet.create({
   statusPillCritical: {
     backgroundColor: '#b63d3d',
   },
-  card: {
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: '#dde5ef',
-    borderRadius: 16,
-    padding: 16,
-    gap: 10,
-    shadowColor: "#000000",
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 3,
-  },
+  card: {},
   sectionTitle: {
     fontSize: 18,
     fontWeight: "700",
@@ -539,14 +531,7 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     alignSelf: "flex-start",
-    backgroundColor: "#16324f",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  secondaryButtonText: {
-    color: "#ffffff",
-    fontWeight: "700",
+    minWidth: 112,
   },
   metric: {
     fontSize: 15,
@@ -619,22 +604,9 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     width: "48%",
-    backgroundColor: "#2d8a65",
-    borderRadius: 10,
-    minHeight: 44,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    alignItems: "center",
-    justifyContent: "center",
   },
   missionActionGridButton: {
     width: "31.5%",
-  },
-  actionDanger: {
-    backgroundColor: "#b63d3d",
-  },
-  actionDisabled: {
-    opacity: 0.45,
   },
   actionText: {
     color: "#ffffff",
@@ -642,14 +614,7 @@ const styles = StyleSheet.create({
   },
   manualLauncher: {
     alignSelf: "flex-start",
-    backgroundColor: "#2c6fb7",
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-  },
-  manualLauncherText: {
-    color: "#ffffff",
-    fontWeight: "700",
+    minWidth: 168,
   },
   modalBackdrop: {
     flex: 1,
