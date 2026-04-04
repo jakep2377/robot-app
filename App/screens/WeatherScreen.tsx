@@ -52,6 +52,7 @@ type LookAheadDay = { key: string; label: string; items: LookAheadItem[] };
 
 const API_KEY = "e324705094164f5dc98161647cccc83a";
 const DEFAULT_LOCATION: LocationState = { latitude: 41.0814, longitude: -81.519, label: "Akron", source: "city" };
+const USE_FAKE_DATA = false;
 const clampPct = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 
 const getPrecipInches = (value?: { rain?: Record<string, number>; snow?: Record<string, number> }) =>
@@ -72,103 +73,6 @@ function getWeatherIconName(condition: string) {
   if (/snow|sleet|ice|freezing/.test(text)) return "weather-snowy";
   if (/mist|fog/.test(text)) return "weather-fog";
   return "weather-partly-cloudy";
-}
-
-function frostRisk(tempF: number, humidity: number) {
-  const tempC = (tempF - 32) * (5 / 9);
-  const dewPointC = (237.7 * (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100))) / (17.27 - (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100)));
-  const dewPointF = (dewPointC * 9) / 5 + 32;
-  const spreadF = tempF - dewPointF;
-  if (tempF <= 32 && dewPointF <= 32) return { level: "high", text: "Frost likely" };
-  if (tempF <= 35 && spreadF < 3) return { level: "moderate", text: "Frost risk rising" };
-  if (tempF > 45 || spreadF > 8) return { level: "low", text: "Low frost risk" };
-  return { level: "moderate", text: "Monitor conditions" };
-}
-
-function buildMix(
-  tempF: number,
-  humidity: number,
-  conditionText: string,
-  precipInches: number,
-  windSpeed: number,
-  windGust: number
-): Mix {
-  const text = conditionText.toLowerCase();
-  const snowOrIce = /snow|sleet|freezing|ice/.test(text);
-  const rain = /rain|drizzle|shower|thunder/.test(text);
-  const frost = frostRisk(tempF, humidity);
-
-  const SALT_MAX = 55;
-  const BRINE_MAX = 1.513;
-
-  const toSaltPct = (kgLkm: number) => clampPct((kgLkm / SALT_MAX) * 100);
-  const toBrinePct = (qLMin: number) => clampPct((qLMin / BRINE_MAX) * 100);
-
-  const LEVELS = {
-    none:   { saltKgLkm: 0,    brineLMin: 0,     reason: "No dispersion recommended" },
-    light:  { saltKgLkm: 25.5, brineLMin: 0.70,  reason: "Light anti-icing application" },
-    medium: { saltKgLkm: 28.0, brineLMin: 0.77,  reason: "Moderate anti-icing application" },
-    heavy:  { saltKgLkm: 51.0, brineLMin: 1.40,  reason: "Heavy anti-icing application" },
-    severe: { saltKgLkm: 55.0, brineLMin: 1.513, reason: "Maximum anti-icing application" },
-  };
-
-  // Warm and dry -> none
-  if (
-    tempF >= 38 &&
-    !snowOrIce &&
-    !rain &&
-    frost.level === "low" &&
-    precipInches < 0.02 &&
-    humidity < 85
-  ) {
-    return {
-      saltPct: 0,
-      brinePct: 0,
-      reason: LEVELS.none.reason,
-    };
-  }
-
-  let selected = LEVELS.light;
-  const reasons: string[] = [];
-
-  // Severe winter conditions
-  if (
-    tempF <= 15 ||
-    (snowOrIce && precipInches >= 0.08) ||
-    (windSpeed >= 20 || windGust >= 28)
-  ) {
-    selected = LEVELS.severe;
-    reasons.push("severe winter conditions");
-  }
-  // Heavy winter conditions
-  else if (
-    tempF <= 25 ||
-    snowOrIce ||
-    (precipInches >= 0.05 && tempF <= 32)
-  ) {
-    selected = LEVELS.heavy;
-    reasons.push("snow/ice or heavier precipitation");
-  }
-  // Moderate risk
-  else if (
-    tempF <= 32 ||
-    rain ||
-    frost.level === "high"
-  ) {
-    selected = LEVELS.medium;
-    reasons.push("near freezing / rain / frost risk");
-  }
-  // Light precaution
-  else {
-    selected = LEVELS.light;
-    reasons.push("light precautionary anti-icing");
-  }
-
-  return {
-    saltPct: toSaltPct(selected.saltKgLkm),
-    brinePct: toBrinePct(selected.brineLMin),
-    reason: `${selected.reason} | ${reasons.join(" | ")}`,
-  };
 }
 
 function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
@@ -496,7 +400,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       const nextItem: LookAheadItem = {
         at: entry.dt,
         label: formatForecastLabel(entry.dt, timezone),
-        tempText: `${Math.round(entry.main.temp)}°F`,
+        tempText: `${Math.round(entry.main.temp)}\u00B0F`,
         condition,
         mixText: `${mix.saltPct}% / ${mix.brinePct}%`,
         mix,
@@ -692,7 +596,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
         <View style={styles.heroRow}>
           <MaterialCommunityIcons name={weatherIcon} size={54} color="#d6e1ec" />
           <View style={styles.heroText}>
-            <Text style={styles.temp}>{Math.round(weather.main.temp)}°F</Text>
+            <Text style={styles.temp}>{Math.round(weather.main.temp)}{"\u00B0F"}</Text>
             <Text style={styles.subtitle}>{weather.weather?.[0]?.description ?? "Unknown"}</Text>
           </View>
         </View>
@@ -789,9 +693,9 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
         <AppButton label="Schedule Service" onPress={scheduleAlert} disabled={!scheduleTarget} style={[styles.primaryScheduleButton, !scheduleTarget ? styles.primaryScheduleButtonDisabled : null]} />
       </AppCard>
 
-      <View style={styles.row}><InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}°F`} /><InfoCard label="Humidity" value={`${weather.main.humidity}%`} /></View>
-      <View style={styles.row}><InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}° / ${Math.round(weather.main.temp_min)}°`} /><InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} /></View>
-      <View style={styles.row}><InfoCard label="Wind" value={`${(weather.wind?.speed ?? 0).toFixed(1)} mph`} detail={`Dir ${(weather.wind?.deg ?? 0).toFixed(0)}° | Gust ${(weather.wind?.gust ?? 0).toFixed(1)} mph`} /><InfoCard label="Precip" value={`${getPrecipInches(weather).toFixed(2)} in`} /></View>
+      <View style={styles.row}><InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}\u00B0F`} /><InfoCard label="Humidity" value={`${weather.main.humidity}%`} /></View>
+      <View style={styles.row}><InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}\u00B0 / ${Math.round(weather.main.temp_min)}\u00B0`} /><InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} /></View>
+      <View style={styles.row}><InfoCard label="Wind" value={`${(weather.wind?.speed ?? 0).toFixed(1)} mph`} detail={`Dir ${(weather.wind?.deg ?? 0).toFixed(0)}\u00B0 | Gust ${(weather.wind?.gust ?? 0).toFixed(1)} mph`} /><InfoCard label="Precip" value={`${getPrecipInches(weather).toFixed(2)} in`} /></View>
       <View style={styles.row}><InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} /><InfoCard label="Visibility" value={`${((weather.visibility ?? 0) / 1609.34).toFixed(1)} mi`} /></View>
       <View style={styles.row}><InfoCard label="Sunrise" value={formatLocalTime(weather.sys?.sunrise, weather.timezone)} /><InfoCard label="Sunset" value={formatLocalTime(weather.sys?.sunset, weather.timezone)} /></View>
     </ScrollView>
