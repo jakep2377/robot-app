@@ -79,52 +79,52 @@ export function buildWorkbookMix(tempF: number, humidity: number, conditionText:
   const severity = snowSeverity(precipInches, windSpeed, windGust);
 
   if (tempF <= 15) {
-    return { saltPct: 0, brinePct: 0, reason: "Workbook table: chemicals not recommended below 15 F" };
+    return { saltPct: 0, brinePct: 0, reason: "No application recommended below 15 F based on the workbook guidance." };
   }
 
   if (frost.level === "low" && !isSnow && !isSleet && !isFreezingRain && !isRain && tempF >= 38 && precipInches < 0.02) {
-    return { saltPct: 0, brinePct: 0, reason: "Workbook table: no treatment above 32 F when conditions are mild" };
+    return { saltPct: 0, brinePct: 0, reason: "No treatment recommended. Conditions are above 32 F and remain mild." };
   }
 
   if (isFreezingRain) {
-    if (tempF > 32) return prewettedSolid(24.5, "Freezing rain table: prewetted solid 21-28 kg/LKM");
-    if (tempF > 20) return prewettedSolid(pickFromRange(21, 70, severity), "Freezing rain table: prewetted solid 21-70 kg/LKM");
-    return prewettedSolid(pickFromRange(70, 110, severity), "Freezing rain table: prewetted solid 70-110 kg/LKM");
+    if (tempF > 32) return prewettedSolid(24.5, "Freezing rain conditions support a light prewetted solid application." );
+    if (tempF > 20) return prewettedSolid(pickFromRange(21, 70, severity), "Freezing rain conditions support a moderate prewetted solid application.");
+    return prewettedSolid(pickFromRange(70, 110, severity), "Freezing rain conditions support a heavy prewetted solid application.");
   }
 
   if (isSleet) {
-    if (tempF > 32) return prewettedSolid(35, "Sleet table: prewetted solid 35 kg/LKM");
-    if (tempF > 28) return prewettedSolid(pickFromRange(35, 90, severity), "Sleet table: prewetted solid 35-90 kg/LKM");
-    return prewettedSolid(pickFromRange(70, 110, severity), "Sleet table: prewetted solid 70-110 kg/LKM");
+    if (tempF > 32) return prewettedSolid(35, "Sleet conditions support a light prewetted solid application.");
+    if (tempF > 28) return prewettedSolid(pickFromRange(35, 90, severity), "Sleet conditions support a moderate prewetted solid application.");
+    return prewettedSolid(pickFromRange(70, 110, severity), "Sleet conditions support a heavy prewetted solid application.");
   }
 
   if (isSnow) {
     const heavySnow = /heavy|blizzard/.test(text) || precipInches >= 0.06 || windGust >= 22;
-    if (tempF > 32) return { saltPct: 0, brinePct: 0, reason: "Snow table: monitor above 32 F" };
-    if (tempF > 30) return combined(28, 28, "Snow table: 28 kg/LKM solid with 28 gal/LM liquid");
+    if (tempF > 32) return { saltPct: 0, brinePct: 0, reason: "Snow is present, but treatment is not recommended above 32 F." };
+    if (tempF > 30) return combined(28, 28, "Light snow conditions support a balanced solid and liquid application.");
     if (tempF > 25) {
-      if (heavySnow) return combined(pickFromRange(42, 55, severity), 55, "Heavy snow table: 42-55 kg/LKM solid and 55 gal/LM liquid");
-      return combined(28, 28, "Light snow table: 28 kg/LKM solid with 28 gal/LM liquid");
+      if (heavySnow) return combined(pickFromRange(42, 55, severity), 55, "Heavy snow conditions support an elevated solid and liquid application.");
+      return combined(28, 28, "Light snow conditions support a balanced solid and liquid application.");
     }
-    return prewettedSolid(pickFromRange(55, 70, severity), heavySnow ? "Snow table: prewetted solid 55-70 kg/LKM" : "Light snow table: prewetted solid 55-70 kg/LKM");
+    return prewettedSolid(pickFromRange(55, 70, severity), heavySnow ? "Cold snow conditions support a heavy prewetted solid application." : "Cold snow conditions support a prewetted solid application.");
   }
 
   if (isIce) {
-    if (tempF > 28) return liquidOnly(pickFromRange(7, 18, frost.level === "high" ? 1 : 0.4), "Frost/black ice table: liquid 7-18 gal/LM");
-    if (tempF > 20) return liquidOnly(pickFromRange(18, 36, frost.level === "high" ? 1 : 0.5), "Frost/black ice table: liquid 18-36 gal/LM");
-    return prewettedSolid(pickFromRange(36, 55, frost.level === "high" ? 1 : 0.5), "Frost/black ice table: prewetted solid 36-55 kg/LKM");
+    if (tempF > 28) return liquidOnly(pickFromRange(7, 18, frost.level === "high" ? 1 : 0.4), "Frost or black ice risk supports a light liquid application.");
+    if (tempF > 20) return liquidOnly(pickFromRange(18, 36, frost.level === "high" ? 1 : 0.5), "Frost or black ice risk supports a moderate liquid application.");
+    return prewettedSolid(pickFromRange(36, 55, frost.level === "high" ? 1 : 0.5), "Frost or black ice risk supports a prewetted solid application.");
   }
 
   if (isRain && tempF <= 34) {
-    return liquidOnly(pickFromRange(48, 87, severity), "Liquid NaCl table: anti-icing for light freezing rain conditions");
+    return liquidOnly(pickFromRange(48, 87, severity), "Near-freezing rain conditions support a liquid anti-icing application.");
   }
 
   if (tempF <= 32) {
-    return liquidOnly(44, "Liquid NaCl table: anti-icing at 31-32 F");
+    return liquidOnly(44, "Near-freezing pavement conditions support a liquid anti-icing application.");
   }
   if (tempF <= 36) {
-    return liquidOnly(32, "Workbook liquid guidance near freezing");
+    return liquidOnly(32, "Cool conditions support a precautionary liquid application.");
   }
 
-  return { saltPct: 0, brinePct: 0, reason: "Workbook table: no treatment indicated for current conditions" };
+  return { saltPct: 0, brinePct: 0, reason: "No treatment is recommended for the current forecast conditions." };
 }

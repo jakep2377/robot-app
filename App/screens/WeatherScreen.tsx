@@ -120,8 +120,8 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
-  const [notificationState, setNotificationState] = useState("Alerts off");
-  const [scheduledAlertText, setScheduledAlertText] = useState("No alert scheduled");
+  const [notificationState, setNotificationState] = useState("Notifications are off");
+  const [scheduledAlertText, setScheduledAlertText] = useState("No service alert is scheduled.");
   const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
   const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
   const [selectedLookAheadDay, setSelectedLookAheadDay] = useState("");
@@ -454,7 +454,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const enableAlerts = async () => {
     const Notifications = getNotificationsModule();
     if (!Notifications) {
-      setNotificationState("Alerts unavailable");
+      setNotificationState("Notifications are unavailable");
       Alert.alert("Rebuild Needed", "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.");
       return false;
     }
@@ -477,11 +477,11 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
 
     const permission = await Notifications.requestPermissionsAsync();
     if (!permission.granted) {
-      setNotificationState("Alerts denied");
+      setNotificationState("Notifications are disabled");
       Alert.alert("Notifications Disabled", "Allow notifications if you want scheduling alerts on this phone.");
       return false;
     }
-    setNotificationState("Alerts ready");
+    setNotificationState("Notifications are enabled");
     return true;
   };
 
@@ -572,7 +572,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: notifyAt, channelId: "weather-scheduler" },
     });
-    setScheduledAlertText(`Alert set for ${notifyAt.toLocaleString()}`);
+    setScheduledAlertText(`Service alert scheduled for ${notifyAt.toLocaleString()}.`);
   };
 
   if (loading) return <View style={[styles.centerState, { paddingTop: insets.top }]}><ActivityIndicator size="large" /><Text style={styles.metaText}>Loading weather...</Text></View>;
@@ -612,7 +612,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
           <ValuePill label="Salt" value={`${currentMix.saltPct}%`} />
           <ValuePill label="Brine" value={`${currentMix.brinePct}%`} />
         </View>
-        {currentMix.saltPct === 0 && currentMix.brinePct === 0 ? <Text style={[styles.callout, styles.badgeLow, styles.calloutText]}>Conditions look clear enough to skip treatment.</Text> : null}
+        {currentMix.saltPct === 0 && currentMix.brinePct === 0 ? <Text style={[styles.callout, styles.badgeLow, styles.calloutText]}>Current conditions do not warrant treatment.</Text> : null}
         <Text style={styles.currentText}>Current: Salt {clampPct(saltPct)}% | Brine {clampPct(brinePct)}%</Text>
         <Text style={styles.manualLabel}>Manual Entry</Text>
         <View style={styles.manualRow}>
@@ -630,9 +630,9 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       </AppCard>
 
       <AppCard title="Scheduling Mode" style={styles.card}>
-        <Text style={styles.metaText}>Source: {activeLocation.source === "phone" ? "Phone location" : "City fallback"}</Text>
-        <Text style={styles.schedulePrimary}>{scheduleTarget ? `Service time: ${scheduleTarget.label}` : "No potential event in the next 36 hours."}</Text>
-        <Text style={styles.scheduleMeta}>{scheduleTarget ? `Mix ${scheduleTarget.mix.saltPct}% salt | ${scheduleTarget.mix.brinePct}% brine | ${scheduleTarget.condition}` : "The forecast is mild enough that no operation is suggested right now."}</Text>
+        <Text style={styles.metaText}>Forecast source: {activeLocation.source === "phone" ? "Phone location" : "Saved city location"}</Text>
+        <Text style={styles.schedulePrimary}>{scheduleTarget ? `Suggested service time: ${scheduleTarget.label}` : "No service event is recommended in the next 36 hours."}</Text>
+        <Text style={styles.scheduleMeta}>{scheduleTarget ? `Recommended mix: ${scheduleTarget.mix.saltPct}% salt | ${scheduleTarget.mix.brinePct}% brine | ${scheduleTarget.condition}` : "The near-term forecast does not currently indicate a recommended service window."}</Text>
         <Text style={styles.scheduleMeta}>{notificationState}</Text>
         <Text style={styles.scheduleMeta}>{scheduledAlertText}</Text>
         <View style={styles.lookAheadHeader}>
@@ -676,7 +676,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
             </View>
           </>
         ) : null}
-        <Text style={styles.scheduleMeta}>Tap a forecast time or enter a manual run time for the selected day.</Text>
+        <Text style={styles.scheduleMeta}>Select a forecast time or enter a manual service time for the selected day.</Text>
         <View style={styles.manualScheduleRow}>
           <TextInput
             style={styles.manualScheduleInput}
@@ -689,7 +689,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
           />
           <AppButton label="Use Time" onPress={applyCustomScheduleTime} variant="secondary" style={styles.manualScheduleButton} />
         </View>
-        <AppButton label={locating ? "Locating..." : "Refresh From Phone Location"} onPress={usePhoneLocation} variant="outline" style={styles.secondaryButton} />
+        <AppButton label={locating ? "Updating Location..." : "Update From Phone Location"} onPress={usePhoneLocation} variant="outline" style={styles.secondaryButton} />
         <AppButton label="Schedule Service" onPress={scheduleAlert} disabled={!scheduleTarget} style={[styles.primaryScheduleButton, !scheduleTarget ? styles.primaryScheduleButtonDisabled : null]} />
       </AppCard>
 
