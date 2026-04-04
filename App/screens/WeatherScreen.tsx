@@ -74,6 +74,103 @@ function getWeatherIconName(condition: string) {
   return "weather-partly-cloudy";
 }
 
+function frostRisk(tempF: number, humidity: number) {
+  const tempC = (tempF - 32) * (5 / 9);
+  const dewPointC = (237.7 * (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100))) / (17.27 - (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100)));
+  const dewPointF = (dewPointC * 9) / 5 + 32;
+  const spreadF = tempF - dewPointF;
+  if (tempF <= 32 && dewPointF <= 32) return { level: "high", text: "Frost likely" };
+  if (tempF <= 35 && spreadF < 3) return { level: "moderate", text: "Frost risk rising" };
+  if (tempF > 45 || spreadF > 8) return { level: "low", text: "Low frost risk" };
+  return { level: "moderate", text: "Monitor conditions" };
+}
+
+function buildMix(
+  tempF: number,
+  humidity: number,
+  conditionText: string,
+  precipInches: number,
+  windSpeed: number,
+  windGust: number
+): Mix {
+  const text = conditionText.toLowerCase();
+  const snowOrIce = /snow|sleet|freezing|ice/.test(text);
+  const rain = /rain|drizzle|shower|thunder/.test(text);
+  const frost = frostRisk(tempF, humidity);
+
+  const SALT_MAX = 55;
+  const BRINE_MAX = 1.513;
+
+  const toSaltPct = (kgLkm: number) => clampPct((kgLkm / SALT_MAX) * 100);
+  const toBrinePct = (qLMin: number) => clampPct((qLMin / BRINE_MAX) * 100);
+
+  const LEVELS = {
+    none:   { saltKgLkm: 0,    brineLMin: 0,     reason: "No dispersion recommended" },
+    light:  { saltKgLkm: 25.5, brineLMin: 0.70,  reason: "Light anti-icing application" },
+    medium: { saltKgLkm: 28.0, brineLMin: 0.77,  reason: "Moderate anti-icing application" },
+    heavy:  { saltKgLkm: 51.0, brineLMin: 1.40,  reason: "Heavy anti-icing application" },
+    severe: { saltKgLkm: 55.0, brineLMin: 1.513, reason: "Maximum anti-icing application" },
+  };
+
+  // Warm and dry -> none
+  if (
+    tempF >= 38 &&
+    !snowOrIce &&
+    !rain &&
+    frost.level === "low" &&
+    precipInches < 0.02 &&
+    humidity < 85
+  ) {
+    return {
+      saltPct: 0,
+      brinePct: 0,
+      reason: LEVELS.none.reason,
+    };
+  }
+
+  let selected = LEVELS.light;
+  const reasons: string[] = [];
+
+  // Severe winter conditions
+  if (
+    tempF <= 15 ||
+    (snowOrIce && precipInches >= 0.08) ||
+    (windSpeed >= 20 || windGust >= 28)
+  ) {
+    selected = LEVELS.severe;
+    reasons.push("severe winter conditions");
+  }
+  // Heavy winter conditions
+  else if (
+    tempF <= 25 ||
+    snowOrIce ||
+    (precipInches >= 0.05 && tempF <= 32)
+  ) {
+    selected = LEVELS.heavy;
+    reasons.push("snow/ice or heavier precipitation");
+  }
+  // Moderate risk
+  else if (
+    tempF <= 32 ||
+    rain ||
+    frost.level === "high"
+  ) {
+    selected = LEVELS.medium;
+    reasons.push("near freezing / rain / frost risk");
+  }
+  // Light precaution
+  else {
+    selected = LEVELS.light;
+    reasons.push("light precautionary anti-icing");
+  }
+
+  return {
+    saltPct: toSaltPct(selected.saltKgLkm),
+    brinePct: toBrinePct(selected.brineLMin),
+    reason: `${selected.reason} | ${reasons.join(" | ")}`,
+  };
+}
+
 function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
   let score = 0;
   const frost = frostRisk(tempF, humidity);
@@ -130,8 +227,209 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [showLookAhead, setShowLookAhead] = useState(false);
 
   const loadWeather = async (location: LocationState) => {
+    const TEST_CASE: "none" | "light" | "medium" | "heavy" | "severe" = "light";
+
     setLoading(true);
+    
     try {
+      if (USE_FAKE_DATA) {
+        const now = Math.floor(Date.now() / 1000);
+
+        const fakeCases: Record<
+          "none" | "light" | "medium" | "heavy" | "severe",
+          { current: WeatherPayload; future: ForecastPayload }
+        > = {
+          none: {
+            current: {
+              name: "Test Clear",
+              dt: now,
+              timezone: 0,
+              visibility: 16093,
+              weather: [{ main: "Clear", description: "clear sky" }],
+              main: {
+                temp: 45,
+                feels_like: 43,
+                temp_min: 42,
+                temp_max: 47,
+                pressure: 1018,
+                humidity: 50,
+              },
+              wind: { speed: 5, deg: 270, gust: 7 },
+              clouds: { all: 5 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ main: "Clear", description: "clear sky" }],
+                  main: { temp: 44, humidity: 52 },
+                  wind: { speed: 4, gust: 6 },
+                },
+              ],
+            },
+          },
+
+          light: {
+            current: {
+              name: "Test Light",
+              dt: now,
+              timezone: 0,
+              visibility: 16093,
+              weather: [{ main: "Clouds", description: "overcast clouds" }],
+              main: {
+                temp: 35,
+                feels_like: 31,
+                temp_min: 33,
+                temp_max: 36,
+                pressure: 1016,
+                humidity: 80,
+              },
+              wind: { speed: 6, deg: 270, gust: 9 },
+              clouds: { all: 95 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ main: "Clouds", description: "broken clouds" }],
+                  main: { temp: 34, humidity: 82 },
+                  wind: { speed: 6, gust: 8 },
+                },
+              ],
+            },
+          },
+
+          medium: {
+            current: {
+              name: "Test Medium",
+              dt: now,
+              timezone: 0,
+              visibility: 12000,
+              weather: [{ main: "Rain", description: "light rain" }],
+              main: {
+                temp: 31,
+                feels_like: 27,
+                temp_min: 30,
+                temp_max: 32,
+                pressure: 1014,
+                humidity: 92,
+              },
+              wind: { speed: 8, deg: 270, gust: 12 },
+              clouds: { all: 100 },
+              rain: { "1h": 0.08 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ main: "Rain", description: "light rain" }],
+                  main: { temp: 30, humidity: 94 },
+                  wind: { speed: 9, gust: 13 },
+                  rain: { "3h": 0.2 },
+                },
+              ],
+            },
+          },
+
+          heavy: {
+            current: {
+              name: "Test Heavy",
+              dt: now,
+              timezone: 0,
+              visibility: 8000,
+              weather: [{ main: "Snow", description: "moderate snow" }],
+              main: {
+                temp: 24,
+                feels_like: 18,
+                temp_min: 22,
+                temp_max: 25,
+                pressure: 1012,
+                humidity: 90,
+              },
+              wind: { speed: 10, deg: 270, gust: 15 },
+              clouds: { all: 100 },
+              snow: { "1h": 1.5 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ main: "Snow", description: "snow" }],
+                  main: { temp: 23, humidity: 91 },
+                  wind: { speed: 11, gust: 16 },
+                  snow: { "3h": 2.5 },
+                },
+              ],
+            },
+          },
+
+          severe: {
+            current: {
+              name: "Test Severe",
+              dt: now,
+              timezone: 0,
+              visibility: 4000,
+              weather: [{ main: "Snow", description: "heavy snow" }],
+              main: {
+                temp: 12,
+                feels_like: 3,
+                temp_min: 10,
+                temp_max: 13,
+                pressure: 1008,
+                humidity: 95,
+              },
+              wind: { speed: 22, deg: 270, gust: 30 },
+              clouds: { all: 100 },
+              snow: { "1h": 3.0 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ main: "Snow", description: "heavy snow" }],
+                  main: { temp: 11, humidity: 96 },
+                  wind: { speed: 24, gust: 32 },
+                  snow: { "3h": 4.5 },
+                },
+              ],
+            },
+          },
+        };
+
+        const selected = fakeCases[TEST_CASE];
+
+        setWeather(selected.current);
+        setForecast(selected.future);
+        setActiveLocation({ ...location, label: selected.current.name || location.label });
+        setError(null);
+        return;
+      }
+
       const query = `lat=${location.latitude}&lon=${location.longitude}&units=imperial&appid=${API_KEY}`;
       const [current, future] = await Promise.all([
         fetchJson<WeatherPayload>(`https://api.openweathermap.org/data/2.5/weather?${query}`),
