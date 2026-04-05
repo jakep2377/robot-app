@@ -67,6 +67,37 @@ type SupervisionSummary = {
     coveredPct?: number;
     coveragePercent?: number;
   } | null;
+  connectivity?: {
+    overall?: {
+      state?: string;
+      ready?: boolean;
+      reason?: string | null;
+      missionState?: string;
+    } | null;
+    backend?: {
+      state?: string;
+      dbOk?: boolean;
+    } | null;
+    baseStation?: {
+      state?: string;
+      reachable?: boolean;
+      queueDepth?: number | null;
+      lastCmdStatus?: string | null;
+    } | null;
+    robot?: {
+      state?: string;
+      reachable?: boolean;
+      telemetryStale?: boolean;
+      gpsReady?: boolean;
+      robotState?: string | null;
+    } | null;
+    commandPath?: {
+      state?: string;
+      ready?: boolean;
+      lastCommandId?: string | null;
+      lastCommandStatus?: string | null;
+    } | null;
+  } | null;
   alerts: Alert[];
   allowedActions: AllowedAction[];
   notes: OperatorNote[];
@@ -77,8 +108,15 @@ type StatusPayload = {
   state?: string;
   mode?: string;
   last_cmd?: string | null;
+  last_cmd_id?: string | null;
+  last_cmd_status?: string | null;
   last_fault?: unknown;
   queue_depth?: number;
+  connectivity?: {
+    state?: string;
+    ready?: boolean;
+    reason?: string | null;
+  } | null;
 };
 
 type HealthPayload = {
@@ -257,6 +295,20 @@ export default function ControllerScreen({
   const hasCriticalAlert = (summary?.alerts ?? []).some((alert) => alert.level === "critical");
   const latestAlert = summary?.alerts?.[summary.alerts.length - 1] ?? null;
   const recentNotes = (summary?.notes ?? []).slice(-2).reverse();
+  const connection = summary?.connectivity ?? null;
+  const overallConnectionState = connection?.overall?.state ?? status?.connectivity?.state ?? (health?.ready ? "online" : "degraded");
+  const backendState = connection?.backend?.state ?? (health?.checks?.db ? "online" : "degraded");
+  const baseStationState = connection?.baseStation?.state ?? (health?.checks?.bridge ? "online" : "degraded");
+  const robotLinkState = connection?.robot?.state ?? (health?.checks?.telemetry ? "online" : "stale");
+  const commandPathState = connection?.commandPath?.state ?? "unknown";
+  const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
+  const connectionPillStyle = overallConnectionState === "online"
+    ? styles.statusPillLive
+    : overallConnectionState === "ready"
+      ? styles.statusPillOk
+      : overallConnectionState === "degraded" || overallConnectionState === "stale"
+        ? styles.statusPillPoll
+        : styles.statusPillCritical;
   const theme = {
     pageBg: '#f3f5f8',
     cardBg: '#ffffff',
@@ -280,6 +332,9 @@ export default function ControllerScreen({
         <View style={[styles.statusPill, styles.statusPillMission]}>
           <Text style={styles.statusPillText}>{missionState}</Text>
         </View>
+        <View style={[styles.statusPill, connectionPillStyle]}>
+          <Text style={styles.statusPillText}>{overallConnectionState.toUpperCase()}</Text>
+        </View>
         <View style={[styles.statusPill, hasCriticalAlert ? styles.statusPillCritical : styles.statusPillOk]}>
           <Text style={styles.statusPillText}>{hasCriticalAlert ? "Critical Alert" : "No Critical Alerts"}</Text>
         </View>
@@ -290,10 +345,15 @@ export default function ControllerScreen({
         <View style={styles.quickGrid}>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot</Text><Text style={[styles.quickValue, { color: theme.text }]}>{summary?.robot?.state ?? status?.state ?? "UNKNOWN"}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Server</Text><Text style={[styles.quickValue, { color: theme.text }]}>{health?.ready ? "Ready" : "Not Ready"}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot Link</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotLinkState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
         </View>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Telemetry {health?.checks?.telemetry ? "OK" : "Stale"} | Bridge {health?.checks?.bridge ? "OK" : "Issue"} | Queue {status?.queue_depth ?? 0}</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>
+          Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"} | Status {status?.last_cmd_status ?? connection?.commandPath?.lastCommandStatus ?? "unknown"} | Queue {connection?.baseStation?.queueDepth ?? status?.queue_depth ?? 0}
+        </Text>
+        {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
