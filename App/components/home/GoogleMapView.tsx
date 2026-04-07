@@ -125,19 +125,47 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const arrows: PlannedCoordinate[] = [];
     const headingToleranceDeg = 12;
     const { areaM2 } = getSelectionMetrics();
-    const minSegmentLengthM = areaM2 > 4000 ? 20 : areaM2 > 1600 ? 14 : 8;
+    const arrowSpacingM = areaM2 > 12000 ? 36 : areaM2 > 4000 ? 24 : areaM2 > 1600 ? 16 : 10;
+    const minSegmentLengthM = arrowSpacingM * 0.9;
     let segmentStart = 0;
 
     const flushSegment = (startIndex: number, endIndex: number) => {
       if (endIndex <= startIndex) return;
+
+      const cumulativeDistances = [0];
       let segmentLengthM = 0;
       for (let i = startIndex + 1; i <= endIndex; i++) {
         segmentLengthM += haversineDistanceMeters(points[i - 1], points[i]);
+        cumulativeDistances.push(segmentLengthM);
       }
       if (segmentLengthM < minSegmentLengthM) return;
-      const midpointIndex = Math.floor((startIndex + endIndex) / 2);
-      const midpoint = points[midpointIndex];
-      if (typeof midpoint.headingDeg === 'number') arrows.push(midpoint);
+
+      const arrowCount = Math.max(1, Math.floor(segmentLengthM / arrowSpacingM));
+      const spacing = segmentLengthM / arrowCount;
+
+      for (let arrowIndex = 0; arrowIndex < arrowCount; arrowIndex++) {
+        const targetDistance = spacing * (arrowIndex + 0.5);
+        let bestPoint: PlannedCoordinate | null = null;
+        let bestDistanceDelta = Number.POSITIVE_INFINITY;
+
+        for (let offset = 0; offset < cumulativeDistances.length; offset++) {
+          const candidate = points[startIndex + offset];
+          if (typeof candidate.headingDeg !== 'number') continue;
+          const delta = Math.abs(cumulativeDistances[offset] - targetDistance);
+          if (delta < bestDistanceDelta) {
+            bestDistanceDelta = delta;
+            bestPoint = candidate;
+          }
+        }
+
+        if (bestPoint) {
+          const lastArrow = arrows[arrows.length - 1];
+          const isDuplicate = lastArrow
+            && lastArrow.latitude === bestPoint.latitude
+            && lastArrow.longitude === bestPoint.longitude;
+          if (!isDuplicate) arrows.push(bestPoint);
+        }
+      }
     };
 
     for (let i = 1; i < points.length; i++) {
@@ -154,7 +182,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     flushSegment(segmentStart, points.length - 1);
     return arrows;
   };
-
   const diagonalCross = (base: LatLng, goal: LatLng, point: LatLng) => (
     (goal.longitude - base.longitude) * (point.latitude - base.latitude) -
     (goal.latitude - base.latitude) * (point.longitude - base.longitude)
@@ -224,16 +251,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const moveBoundaryCorner = (index: number, nextCoordinate: LatLng) => {
     if (!selection) return;
-    const currentBoundary = selection.boundary;
-    const baseCorner = index === 0 ? nextCoordinate : currentBoundary[0];
-    const goalCorner = index === 2 ? nextCoordinate : currentBoundary[2];
-    const sideCornerA = index === 1 ? nextCoordinate : currentBoundary[1];
-    const sideCornerB = index === 3 ? nextCoordinate : currentBoundary[3];
-    updateSelectionFromBoundary(orderBoundaryPoints(baseCorner, goalCorner, sideCornerA, sideCornerB));
-    setMessage(`${cornerLabels[index]} updated.`);
+    const nextBoundary = selection.boundary.map((point, pointIndex) => (
+      pointIndex === index ? nextCoordinate : point
+    ));
+    updateSelectionFromBoundary(nextBoundary);
+    setMessage(`${cornerLabels[index]} updated. Submit the area again before planning.`);
   };
-
-
   const toggleMapType = () => {
     setMapType((prevType) => {
       const nextType = prevType === 'standard' ? 'hybrid' : 'standard';
@@ -384,9 +407,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   title={cornerLabels[index]}
                   description={'Press and hold, then drag to adjust this corner'}
                   onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
-                >
-                  <View style={[styles.cornerMarker, index === 0 ? styles.cornerMarkerBase : index === 2 ? styles.cornerMarkerGoal : styles.cornerMarkerEdge]} />
-                </Marker>
+                />
               ))}
               {plannedPath.length > 1 ? (
                 <>
@@ -421,7 +442,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                           name="navigation"
                           size={Math.max(12, arrowSize - 4)}
                           color="#1f5f9f"
-                          style={{ transform: [{ rotate: '45deg' }] }}
                         />
                       </View>
                     </Marker>
@@ -625,28 +645,6 @@ const styles = StyleSheet.create({
   actionFill: {
     flex: 1,
   },
-  cornerMarker: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 4,
-    borderColor: '#ffffff',
-    backgroundColor: '#2c6fb7',
-    shadowColor: '#16324f',
-    shadowOpacity: 0.18,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 4,
-  },
-  cornerMarkerBase: {
-    backgroundColor: '#2d8a65',
-  },
-  cornerMarkerGoal: {
-    backgroundColor: '#b63d3d',
-  },
-  cornerMarkerEdge: {
-    backgroundColor: '#2c6fb7',
-  },
   secondaryAction: {
     flex: 1,
     minHeight: 34,
@@ -683,6 +681,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#9eabb8',
   },
 });
+
+
+
 
 
 

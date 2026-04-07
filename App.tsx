@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -18,7 +19,7 @@ import ControllerScreen from './App/screens/ControllerScreen';
 import AreaMapScreen from './App/screens/AreaMapScreen';
 import WeatherScreen from './App/screens/WeatherScreen';
 import HelpPane from './App/components/common/HelpPane';
-import { normalizeServerUrl, probeServer, type ServerProbeResult } from './App/lib/serverApi';
+import { configureBaseStationSetup, normalizeBaseStationUrl, normalizeServerUrl, probeBaseStationSetup, probeServer, type BaseStationSetupStatus, type ServerProbeResult } from './App/lib/serverApi';
 
 const Tab = createBottomTabNavigator();
 const DEFAULT_CLOUD_SERVER_URL = 'https://robot-lora-server.onrender.com';
@@ -436,3 +437,8 @@ const styles = StyleSheet.create({
     color: '#21466d',
   },
 });
+
+
+
+
+

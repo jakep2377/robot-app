@@ -8,6 +8,16 @@ export function normalizeServerUrl(rawUrl: string) {
   return withProtocol.replace(/\/+$/, "");
 }
 
+export function normalizeBaseStationUrl(rawUrl: string) {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return "http://192.168.4.1";
+  }
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withProtocol.replace(/\/+$/, "");
+}
+
 export function toWebSocketUrl(serverUrl: string) {
   return normalizeServerUrl(serverUrl).replace(/^http/i, "ws");
 }
@@ -19,6 +29,26 @@ export type ServerProbeResult = {
   latencyMs: number;
   error?: string;
   payload?: unknown;
+};
+
+export type BaseStationSetupStatus = {
+  ok?: boolean;
+  configured?: boolean;
+  mode?: string;
+  state?: string;
+  apSsid?: string;
+  savedSsid?: string;
+  backendUrl?: string;
+  wifiLinkState?: string;
+};
+
+export type BaseStationSetupProbeResult = {
+  ok: boolean;
+  baseStationUrl: string;
+  status: number | null;
+  latencyMs: number;
+  error?: string;
+  payload?: BaseStationSetupStatus | null;
 };
 
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 5000) {
@@ -107,6 +137,77 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
       error: error instanceof Error ? error.message : "Probe failed",
     };
   }
+}
+
+export async function probeBaseStationSetup(baseStationUrl: string, timeoutMs = 2500): Promise<BaseStationSetupProbeResult> {
+  const normalized = normalizeBaseStationUrl(baseStationUrl);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetchWithTimeout(`${normalized}/setup/status`, {
+      headers: {
+        Accept: 'application/json',
+      },
+    }, timeoutMs);
+    const text = await readBody(response);
+    const latencyMs = Date.now() - startedAt;
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        baseStationUrl: normalized,
+        status: response.status,
+        latencyMs,
+        error: text || `HTTP ${response.status}`,
+        payload: null,
+      };
+    }
+
+    let payload: BaseStationSetupStatus | null = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text) as BaseStationSetupStatus;
+      } catch {
+        payload = null;
+      }
+    }
+
+    return {
+      ok: true,
+      baseStationUrl: normalized,
+      status: response.status,
+      latencyMs,
+      payload,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      baseStationUrl: normalized,
+      status: null,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : 'Base station setup probe failed',
+      payload: null,
+    };
+  }
+}
+
+export async function configureBaseStationSetup(baseStationUrl: string, body: {
+  ssid: string;
+  password: string;
+  backendUrl?: string;
+}) {
+  const response = await fetchWithTimeout(`${normalizeBaseStationUrl(baseStationUrl)}/setup/network`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }, 7000);
+  const text = await readBody(response);
+  if (!response.ok) {
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return text ? JSON.parse(text) as { ok?: boolean; message?: string } : {};
 }
 
 function buildAuthHeaders() {
