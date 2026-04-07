@@ -65,7 +65,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [drawingMode, setDrawingMode] = useState(false);
   const [firstPoint, setFirstPoint] = useState<LatLng | null>(null);
   const [selection, setSelection] = useState<RectangleSelection | null>(null);
-  const [selectedCornerIndex, setSelectedCornerIndex] = useState<number | null>(null);
   const [plannedPath, setPlannedPath] = useState<PlannedCoordinate[]>([]);
   const [plannedPathDistanceM, setPlannedPathDistanceM] = useState(0);
   const [coverageCells, setCoverageCells] = useState<CoverageCell[]>([]);
@@ -170,11 +169,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const cornerLabels = ['Base Corner', 'Boundary Corner', 'Goal Corner', 'Boundary Corner'];
-  const getCornerButtonLabel = (index: number) => {
-    if (index === 0) return 'Move Base';
-    if (index === 2) return 'Move Goal';
-    return index === 1 ? 'Move Edge A' : 'Move Edge B';
-  };
 
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
@@ -202,7 +196,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setMessage('Area set. Submit it, then plan the path.');
     setDrawingMode(false);
     setFirstPoint(null);
-    setSelectedCornerIndex(null);
     requestAnimationFrame(() => {
       mapRef.current?.fitToCoordinates(nextSelection.boundary, {
         edgePadding: { top: 80, right: 80, bottom: 80, left: 80 },
@@ -212,17 +205,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const handleMapPress = (event: MapPressEvent) => {
+    if (!drawingMode) return;
     const { latitude, longitude } = event.nativeEvent.coordinate;
-    const nextCoordinate = { latitude, longitude };
-    if (drawingMode) {
-      applyCorner(nextCoordinate);
-      return;
-    }
-    if (selection && selectedCornerIndex != null) {
-      moveBoundaryCorner(selectedCornerIndex, nextCoordinate);
-      setMessage(`${cornerLabels[selectedCornerIndex]} moved.`);
-      return;
-    }
+    applyCorner({ latitude, longitude });
   };
 
   const zoomBy = async (delta: number) => {
@@ -245,14 +230,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const sideCornerA = index === 1 ? nextCoordinate : currentBoundary[1];
     const sideCornerB = index === 3 ? nextCoordinate : currentBoundary[3];
     updateSelectionFromBoundary(orderBoundaryPoints(baseCorner, goalCorner, sideCornerA, sideCornerB));
-    setSelectedCornerIndex(index);
     setMessage(`${cornerLabels[index]} updated.`);
   };
 
-  const beginCornerMove = (index: number) => {
-    setSelectedCornerIndex(index);
-    setMessage(`Tap the map to move ${cornerLabels[index].toLowerCase()}.`);
-  };
 
   const toggleMapType = () => {
     setMapType((prevType) => {
@@ -402,12 +382,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   draggable
                   pinColor={index === 0 ? '#2d8a65' : index === 2 ? '#b63d3d' : '#2c6fb7'}
                   title={cornerLabels[index]}
-                  description={selectedCornerIndex === index ? 'Selected for tap-to-move' : 'Drag or choose Move below'}
-                  onPress={() => beginCornerMove(index)}
-                  onDragStart={() => beginCornerMove(index)}
+                  description={'Press and hold, then drag to adjust this corner'}
                   onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
                 >
-                  <View style={[styles.cornerMarker, selectedCornerIndex === index && styles.cornerMarkerSelected, index === 0 ? styles.cornerMarkerBase : index === 2 ? styles.cornerMarkerGoal : styles.cornerMarkerEdge]} />
+                  <View style={[styles.cornerMarker, index === 0 ? styles.cornerMarkerBase : index === 2 ? styles.cornerMarkerGoal : styles.cornerMarkerEdge]} />
                 </Marker>
               ))}
               {plannedPath.length > 1 ? (
@@ -495,22 +473,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         {plannedPath.length > 1 ? (
           <Text style={styles.pathMetaText}>Path: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
         ) : null}
-        {selection ? (
-          <View style={styles.cornerEditWrap}>
-            <Text style={styles.cornerEditLabel}>Adjust corners</Text>
-            <View style={styles.cornerEditRow}>
-              {selection.boundary.map((_, index) => (
-                <AppButton
-                  key={`move-corner-${index}`}
-                  label={getCornerButtonLabel(index)}
-                  onPress={() => beginCornerMove(index)}
-                  variant={selectedCornerIndex === index ? 'primary' : 'outline'}
-                  style={styles.cornerEditButton}
-                />
-              ))}
-            </View>
-          </View>
-        ) : null}
         <View style={styles.actionRow}>
           <AppButton
             label={drawingMode ? 'Drawing...' : 'Draw Area'}
@@ -519,7 +481,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               resetPlanningState();
               setDrawingMode(true);
               setFirstPoint(null);
-              setSelectedCornerIndex(null);
               setMessage('Pick the first corner, then the opposite corner.');
             }}
             variant="outline"
@@ -532,7 +493,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               resetPlanningState();
               setFirstPoint(null);
               setDrawingMode(false);
-              setSelectedCornerIndex(null);
               setMessage('Area cleared.');
             }}
             variant="outline"
@@ -666,12 +626,17 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   cornerMarker: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    borderWidth: 3,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 4,
     borderColor: '#ffffff',
     backgroundColor: '#2c6fb7',
+    shadowColor: '#16324f',
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 4,
   },
   cornerMarkerBase: {
     backgroundColor: '#2d8a65',
@@ -681,36 +646,6 @@ const styles = StyleSheet.create({
   },
   cornerMarkerEdge: {
     backgroundColor: '#2c6fb7',
-  },
-  cornerMarkerSelected: {
-    transform: [{ scale: 1.15 }],
-    shadowColor: '#1f5f9f',
-    shadowOpacity: 0.28,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 4,
-  },
-  cornerEditWrap: {
-    marginTop: 8,
-    marginBottom: 2,
-    gap: 6,
-  },
-  cornerEditLabel: {
-    color: '#4f6275',
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  cornerEditRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  cornerEditButton: {
-    minHeight: 38,
-    minWidth: 0,
-    paddingHorizontal: 10,
   },
   secondaryAction: {
     flex: 1,
@@ -748,6 +683,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#9eabb8',
   },
 });
+
+
 
 
 
