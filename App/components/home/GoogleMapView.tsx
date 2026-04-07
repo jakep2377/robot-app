@@ -475,7 +475,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             />
           </View>
           <Text style={[styles.modeChipSub, { color: theme.muted }]} numberOfLines={1}>
-            {`Salt ${saltPct}% · Brine ${brinePct}%`}
+            {`Salt ${saltPct}% â€¢ Brine ${brinePct}%`}
           </Text>
         </View>
         <View style={styles.modeChipActions}>
@@ -491,9 +491,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
       <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
         <Text style={[styles.overlayText, { color: theme.text }]}>{message}</Text>
-        <Text style={styles.stepText}>Draw area · Submit area · Plan path</Text>
+        <Text style={styles.stepText}>Draw area â€¢ Submit area â€¢ Plan path</Text>
         {plannedPath.length > 1 ? (
-          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points · {(plannedPathDistanceM / 1000).toFixed(2)} km · Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
+          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points â€¢ {(plannedPathDistanceM / 1000).toFixed(2)} km â€¢ Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
         ) : null}
         {selection ? (
           <View style={styles.cornerEditWrap}>
