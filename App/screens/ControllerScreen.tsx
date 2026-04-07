@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -32,6 +32,44 @@ type Alert = {
   code: string;
   message: string;
   at?: number;
+};
+
+type TestMenuInputSpec = {
+  field: string;
+  label: string;
+  placeholder?: string;
+};
+
+type TestMenuAction = {
+  id: string;
+  title: string;
+  description?: string;
+  group?: string;
+  caution?: string;
+  shortcut?: string;
+  kind?: string;
+  needsInput?: TestMenuInputSpec | null;
+};
+
+type CommandTransport = {
+  stage?: string | null;
+  baseStationCommandStatus?: string | null;
+  ackCategory?: string | null;
+  ackSource?: string | null;
+  robotAckState?: string | null;
+  waypointIndex?: number | null;
+  waypointCount?: number | null;
+};
+
+type CommandHistoryEntry = {
+  commandId: string;
+  cmd?: string | null;
+  status?: string | null;
+  source?: string | null;
+  error?: string | null;
+  updatedAt?: number;
+  at?: number;
+  transport?: CommandTransport | null;
 };
 
 type SupervisionSummary = {
@@ -135,6 +173,18 @@ type SummaryResponse = {
   summary: SupervisionSummary;
 };
 
+type TestMenuRunResponse = {
+  ok: boolean;
+  actionId?: string;
+  result?: Record<string, unknown>;
+};
+
+type TestMenuResponse = {
+  ok: boolean;
+  tests: TestMenuAction[];
+  commandHistory?: CommandHistoryEntry[];
+};
+
 type StatusResponse = StatusPayload;
 
 type Props = {
@@ -165,6 +215,10 @@ export default function ControllerScreen({
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [summary, setSummary] = useState<SupervisionSummary | null>(null);
   const [health, setHealth] = useState<HealthPayload | null>(null);
+  const [testMenu, setTestMenu] = useState<TestMenuAction[]>([]);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
+  const [testInputs, setTestInputs] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -179,15 +233,20 @@ export default function ControllerScreen({
     refreshInFlight.current = true;
 
     try {
-      const [statusData, summaryData, healthResult] = await Promise.all([
+      const [statusData, summaryData, healthResult, testMenuResult] = await Promise.all([
         getJson<StatusResponse>(serverUrl, "/status"),
         getJson<SummaryResponse>(serverUrl, "/api/supervision/summary"),
         getJsonAllowError<HealthPayload>(serverUrl, "/api/health"),
+        getJsonAllowError<TestMenuResponse>(serverUrl, "/api/test-menu"),
       ]);
 
       setStatus(statusData);
       setSummary(summaryData.summary);
       setHealth(healthResult.data);
+      if (testMenuResult.ok && testMenuResult.data?.ok) {
+        setTestMenu(Array.isArray(testMenuResult.data.tests) ? testMenuResult.data.tests : []);
+        setCommandHistory(Array.isArray(testMenuResult.data.commandHistory) ? testMenuResult.data.commandHistory : []);
+      }
       setError(null);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to refresh server state");
@@ -220,7 +279,16 @@ export default function ControllerScreen({
           return;
         }
 
-        if (message.event === "state.snapshot" || message.event === "mission.updated" || message.event === "telemetry.updated" || message.event === "fault.received") {
+        if (
+          message.event === "state.snapshot" ||
+          message.event === "mission.updated" ||
+          message.event === "telemetry.updated" ||
+          message.event === "fault.received" ||
+          message.event === "command.received" ||
+          message.event === "path.updated" ||
+          message.event === "area.updated" ||
+          message.event === "operator.updated"
+        ) {
           refresh();
         }
       } catch {
@@ -289,12 +357,59 @@ export default function ControllerScreen({
     }
   };
 
+  const setTestInputValue = (field: string, value: string) => {
+    setTestInputs((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  const runServerTest = async (action: TestMenuAction) => {
+    const field = action.needsInput?.field;
+    const rawValue = field ? (testInputs[field] ?? "").trim() : "";
+
+    if (field && !rawValue) {
+      setError(`${action.needsInput?.label ?? action.title} is required.`);
+      return;
+    }
+
+    setPendingAction(action.id);
+    try {
+      const payload: Record<string, unknown> = { actionId: action.id };
+      if (field) {
+        payload[field] = rawValue;
+      }
+      const response = await postJson<TestMenuRunResponse>(serverUrl, "/api/test-menu/run", payload);
+      const resultSummary = response?.result ? JSON.stringify(response.result) : "Completed";
+      setTestResult(`${action.title}: ${resultSummary}`);
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `${action.title} failed`);
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const groupedTestMenu = useMemo(() => {
+    const groups = new Map<string, TestMenuAction[]>();
+    for (const action of testMenu) {
+      const groupName = action.group ?? "Operations";
+      const existing = groups.get(groupName) ?? [];
+      existing.push(action);
+      groups.set(groupName, existing);
+    }
+    return Array.from(groups.entries());
+  }, [testMenu]);
+
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
   const missionState = summary?.mission?.state ?? status?.state ?? "UNKNOWN";
   const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
   const hasCriticalAlert = (summary?.alerts ?? []).some((alert) => alert.level === "critical");
   const latestAlert = summary?.alerts?.[summary.alerts.length - 1] ?? null;
   const recentNotes = (summary?.notes ?? []).slice(-2).reverse();
+  const recentCommands = commandHistory.slice(0, 6);
+  const latestCommand = recentCommands[0] ?? null;
   const connection = summary?.connectivity ?? null;
   const overallConnectionState = connection?.overall?.state ?? status?.connectivity?.state ?? (health?.ready ? "online" : "degraded");
   const backendState = connection?.backend?.state ?? (health?.checks?.db ? "online" : "degraded");
@@ -403,6 +518,87 @@ export default function ControllerScreen({
           </View>
         ) : (
           <Text style={[styles.metaText, { color: theme.muted }]}>No alerts.</Text>
+        )}
+      </AppCard>
+
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operations</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Server-backed checks and individual system actions.</Text>
+        {groupedTestMenu.length ? groupedTestMenu.map(([groupName, actions]) => (
+          <View key={groupName} style={styles.opsGroup}>
+            <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>{groupName}</Text>
+            {actions.map((action) => {
+              const field = action.needsInput?.field;
+              const inputValue = field ? (testInputs[field] ?? "") : "";
+              const variant = action.caution === "danger"
+                ? "danger"
+                : action.caution === "safe"
+                  ? "secondary"
+                  : "primary";
+
+              return (
+                <View key={action.id} style={styles.opsActionRow}>
+                  <View style={styles.opsActionTextBlock}>
+                    <Text style={[styles.opsActionTitle, { color: theme.text }]}>
+                      {action.title}{action.shortcut ? ` (${action.shortcut})` : ""}
+                    </Text>
+                    {action.description ? <Text style={[styles.metaText, { color: theme.muted }]}>{action.description}</Text> : null}
+                  </View>
+                  {field ? (
+                    <View style={styles.opsInputRow}>
+                      <TextInput
+                        style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+                        value={inputValue}
+                        onChangeText={(value) => setTestInputValue(field, value)}
+                        placeholder={action.needsInput?.placeholder ?? action.needsInput?.label ?? action.title}
+                        placeholderTextColor={theme.muted}
+                        autoCapitalize="none"
+                      />
+                      <AppButton
+                        label={pendingAction === action.id ? "Running..." : "Run"}
+                        onPress={() => runServerTest(action)}
+                        disabled={pendingAction === action.id}
+                        compact
+                        variant={variant as "primary" | "secondary" | "success" | "danger"}
+                        style={styles.opsButton}
+                      />
+                    </View>
+                  ) : (
+                    <AppButton
+                      label={pendingAction === action.id ? "Running..." : "Run"}
+                      onPress={() => runServerTest(action)}
+                      disabled={pendingAction === action.id}
+                      compact
+                      variant={variant as "primary" | "secondary" | "success" | "danger"}
+                      style={styles.opsButton}
+                    />
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        )) : (
+          <Text style={[styles.metaText, { color: theme.muted }]}>No server operations available.</Text>
+        )}
+        {testResult ? <Text style={[styles.metaText, { color: theme.muted }]}>{testResult}</Text> : null}
+      </AppCard>
+
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Recent Commands</Text>
+        {recentCommands.length ? recentCommands.map((entry) => (
+          <View key={entry.commandId} style={styles.commandHistoryRow}>
+            <View style={styles.commandHistoryTextBlock}>
+              <Text style={[styles.commandHistoryTitle, { color: theme.text }]}>{entry.cmd ?? entry.commandId}</Text>
+              <Text style={[styles.metaText, { color: theme.muted }]}>
+                {entry.commandId} | {entry.transport?.stage ?? entry.status ?? "unknown"}
+                {entry.transport?.ackCategory ? ` | ${entry.transport.ackCategory}` : ""}
+              </Text>
+              {entry.error ? <Text style={styles.error}>{entry.error}</Text> : null}
+            </View>
+            <Text style={[styles.noteMeta, { color: theme.muted }]}>{new Date(entry.updatedAt ?? entry.at ?? Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</Text>
+          </View>
+        )) : (
+          <Text style={[styles.metaText, { color: theme.muted }]}>No command activity yet.</Text>
         )}
       </AppCard>
 
@@ -745,6 +941,62 @@ const styles = StyleSheet.create({
   alertMessage: {
     color: "#304863",
   },
+  opsGroup: {
+    marginTop: 10,
+    gap: 8,
+  },
+  opsGroupTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#16324f",
+  },
+  opsActionRow: {
+    gap: 8,
+    borderWidth: 1,
+    borderColor: "#e3eaf2",
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "#fbfcfe",
+  },
+  opsActionTextBlock: {
+    gap: 2,
+  },
+  opsActionTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#22374d",
+  },
+  opsInputRow: {
+    flexDirection: "row",
+    gap: 8,
+    alignItems: "center",
+  },
+  opsInput: {
+    flex: 1,
+    minHeight: 42,
+  },
+  opsButton: {
+    minWidth: 92,
+  },
+  commandHistoryRow: {
+    borderTopWidth: 1,
+    borderTopColor: "#e1e6ec",
+    paddingTop: 10,
+    gap: 4,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  commandHistoryTextBlock: {
+    flex: 1,
+    gap: 2,
+    paddingRight: 8,
+  },
+  commandHistoryTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#22374d",
+  },
   noteRow: {
     borderTopWidth: 1,
     borderTopColor: "#e1e6ec",
@@ -764,3 +1016,13 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 });
+
+
+
+
+
+
+
+
+
+
