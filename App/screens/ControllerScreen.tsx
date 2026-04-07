@@ -72,6 +72,24 @@ type CommandHistoryEntry = {
   transport?: CommandTransport | null;
 };
 
+type DemoSpot = {
+  at?: number;
+  markedAt?: number;
+  source?: string | null;
+  note?: string | null;
+  robot?: {
+    state?: string | null;
+    gpsFix?: boolean | null;
+    lat?: number | null;
+    lon?: number | null;
+  } | null;
+};
+
+type DemoSpotStatus = {
+  ready?: boolean;
+  reason?: string | null;
+};
+
 type SupervisionSummary = {
   mission: {
     id: number;
@@ -111,6 +129,8 @@ type SupervisionSummary = {
       ready?: boolean;
       reason?: string | null;
       missionState?: string;
+      connectionPath?: string | null;
+      connectionPathLabel?: string | null;
     } | null;
     backend?: {
       state?: string;
@@ -121,6 +141,8 @@ type SupervisionSummary = {
       reachable?: boolean;
       queueDepth?: number | null;
       lastCmdStatus?: string | null;
+      connectionPath?: string | null;
+      connectionPathLabel?: string | null;
     } | null;
     robot?: {
       state?: string;
@@ -134,6 +156,19 @@ type SupervisionSummary = {
       ready?: boolean;
       lastCommandId?: string | null;
       lastCommandStatus?: string | null;
+    } | null;
+  } | null;
+  demo?: {
+    enabled?: boolean;
+    updatedAt?: number | null;
+    source?: string | null;
+    spots?: {
+      start?: DemoSpot | null;
+      end?: DemoSpot | null;
+    } | null;
+    spotGpsStatus?: {
+      start?: DemoSpotStatus | null;
+      end?: DemoSpotStatus | null;
     } | null;
   } | null;
   alerts: Alert[];
@@ -166,6 +201,13 @@ type HealthPayload = {
     telemetry?: boolean;
   };
   telemetryStale?: boolean;
+  persistence?: {
+    restoredAt?: number | null;
+    lastSavedAt?: number | null;
+    lastSaveReason?: string | null;
+    lastSaveError?: string | null;
+    exists?: boolean;
+  } | null;
 };
 
 type SummaryResponse = {
@@ -193,6 +235,12 @@ type Props = {
   brinePct: number;
   setSaltPct: (value: number) => void;
   setBrinePct: (value: number) => void;
+  connectionLabel: string;
+  connectionStatus: 'connecting' | 'connected' | 'fallback' | 'error';
+  connectionDetail: string;
+  connectionMode: 'discovering' | 'local' | 'cloud' | 'manual';
+  connectionBusy: boolean;
+  onOpenConnection: () => void;
 };
 
 const MISSION_ENDPOINTS: Record<string, string> = {
@@ -210,6 +258,12 @@ export default function ControllerScreen({
   brinePct,
   setSaltPct,
   setBrinePct,
+  connectionLabel,
+  connectionStatus,
+  connectionDetail,
+  connectionMode,
+  connectionBusy,
+  onOpenConnection,
 }: Props) {
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<StatusPayload | null>(null);
@@ -224,6 +278,9 @@ export default function ControllerScreen({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
+  const [connectionExpanded, setConnectionExpanded] = useState(false);
+  const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
+  const [preflightVisible, setPreflightVisible] = useState(false);
   const refreshInFlight = useRef(false);
 
   const refresh = async () => {
@@ -364,6 +421,70 @@ export default function ControllerScreen({
     }));
   };
 
+  const openPreflight = () => {
+    if (demoModeEnabled) {
+      setError("Demo mode is on. Use manual drive for the indoor demo instead of starting a mission.");
+      return;
+    }
+    setPreflightVisible(true);
+  };
+
+  const confirmMissionStart = async () => {
+    setPreflightVisible(false);
+    await performAction("mission-start");
+  };
+
+  const toggleDemoMode = async () => {
+    setPendingAction('demo-mode-toggle');
+    try {
+      await postJson(serverUrl, '/api/demo-mode', {
+        enabled: !demoModeEnabled,
+        source: 'app.controller',
+      });
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to change demo mode');
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const markDemoSpot = async (kind: 'start' | 'end') => {
+    setPendingAction(`demo-spot-${kind}`);
+    try {
+      await postJson(serverUrl, '/api/demo-mode/spot', {
+        kind,
+        source: 'app.controller',
+      });
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `Unable to mark ${kind === 'start' ? 'Spot A' : 'Spot B'}`);
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const buildDemoPath = async (allowWeakGps = false) => {
+    setPendingAction(allowWeakGps ? "demo-path-override" : "demo-path");
+    try {
+      const response = await postJson<{ warnings?: string[] }>(serverUrl, "/api/demo-mode/path", {
+        source: "app.controller",
+        saltPct,
+        brinePct,
+        allowWeakGps,
+      });
+      setTestResult(Array.isArray(response?.warnings) && response.warnings.length ? response.warnings.join(" ") : null);
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to build demo path");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
   const runServerTest = async (action: TestMenuAction) => {
     const field = action.needsInput?.field;
     const rawValue = field ? (testInputs[field] ?? "").trim() : "";
@@ -417,6 +538,32 @@ export default function ControllerScreen({
   const robotLinkState = connection?.robot?.state ?? (health?.checks?.telemetry ? "online" : "stale");
   const commandPathState = connection?.commandPath?.state ?? "unknown";
   const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
+  const connectionPathLabel = connectionMode === 'cloud'
+    ? 'Remote fallback'
+    : connection?.baseStation?.connectionPathLabel ?? connection?.overall?.connectionPathLabel ?? 'Field network';
+  const gpsReady = Boolean(connection?.robot?.gpsReady);
+  const waypointsCommitted = summary?.lora?.wpPushState === "committed";
+  const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
+  const demoModeEnabled = Boolean(summary?.demo?.enabled);
+  const demoSpots = summary?.demo?.spots ?? null;
+  const demoSpotGpsStatus = summary?.demo?.spotGpsStatus ?? null;
+  const restoredAt = health?.persistence?.restoredAt ?? null;
+  const showRecoveryBanner = Boolean(restoredAt && missionState !== "IDLE");
+  const readinessItems = [
+    { label: "Backend", value: backendState.toUpperCase(), good: backendState === "online" },
+    { label: "Connection path", value: connectionPathLabel, good: true },
+    { label: "Base station", value: baseStationState.toUpperCase(), good: baseStationState === "online" },
+    { label: "Robot link", value: robotLinkState.toUpperCase(), good: robotLinkState === "online" },
+    { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
+    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
+  ];
+  const preflightItems = [
+    { label: "Backend connected", detail: "The app can reach the field backend.", good: backendState === "online" },
+    { label: "Base station reachable", detail: "The backend can reach the base station.", good: baseStationState === "online" },
+    { label: "Robot link live", detail: "Robot telemetry is current.", good: robotLinkState === "online" },
+    { label: "GPS ready", detail: "The robot has a valid GPS fix for autonomy.", good: gpsReady },
+    { label: "Waypoints committed", detail: "The planned path has been committed to the robot.", good: waypointsCommitted },
+  ];
   const connectionPillStyle = overallConnectionState === "online"
     ? styles.statusPillLive
     : overallConnectionState === "ready"
@@ -437,6 +584,52 @@ export default function ControllerScreen({
     inputText: '#13233a',
   };
 
+  const connectionDotStyle = [
+    styles.connectionDot,
+    connectionStatus === 'connected'
+      ? styles.connectionDotConnected
+      : connectionStatus === 'fallback'
+        ? styles.connectionDotFallback
+        : connectionStatus === 'error'
+          ? styles.connectionDotError
+          : styles.connectionDotConnecting,
+  ];
+  const connectionBadgeLabel = connectionBusy
+    ? 'Checking'
+    : connectionMode === 'cloud'
+      ? 'Remote'
+      : connectionMode === 'manual'
+        ? 'Manual'
+        : connectionStatus === 'error'
+          ? 'Offline'
+          : 'Field';
+
+  const shouldHighlightConnection = connectionBusy || connectionStatus === 'error' || connectionMode === 'cloud' || connectionMode === 'manual';
+  const formatDemoSpot = (spot?: DemoSpot | null, emptyLabel = "Not marked yet") => {
+    const markedAt = spot?.markedAt ?? spot?.at ?? null;
+    if (!markedAt) {
+      return emptyLabel;
+    }
+    const parts = [
+      `Marked ${new Date(markedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+    ];
+    if (spot?.robot?.state) {
+      parts.push(`Robot ${spot?.robot?.state}`);
+    }
+    if (spot?.robot?.gpsFix === true) {
+      parts.push("GPS fix");
+    }
+    if (spot?.robot?.gpsFix === false) {
+      parts.push("No GPS fix");
+    }
+    return parts.join(" · ");
+  };
+
+
+  useEffect(() => {
+    setConnectionExpanded(shouldHighlightConnection);
+  }, [shouldHighlightConnection]);
+
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
       <Text style={[styles.title, { color: theme.title }]}>Robot Controller</Text>
@@ -455,12 +648,24 @@ export default function ControllerScreen({
         </View>
       </View>
 
+      {showRecoveryBanner ? (
+        <AppCard style={[styles.card, styles.recoveryCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+          <Text style={[styles.sectionTitle, styles.recoveryTitle, { color: theme.sectionTitle }]}>Mission Restored</Text>
+          <Text style={[styles.metaText, { color: theme.text }]}>
+            The backend restored an in-progress mission after restart. Review the system, then continue when you are ready.
+          </Text>
+          <Text style={[styles.metaText, { color: theme.muted }]}>
+            Restored {restoredAt ? new Date(restoredAt).toLocaleString() : 'recently'}
+          </Text>
+        </AppCard>
+      ) : null}
+
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Quick Status</Text>
         <View style={styles.quickGrid}>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot Link</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotLinkState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
@@ -471,11 +676,65 @@ export default function ControllerScreen({
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>
 
+      <AppCard style={[styles.card, styles.connectionCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Pressable style={styles.connectionCardRow} onPress={() => setConnectionExpanded((current) => !current)}>
+          <View style={styles.connectionCardInfo}>
+            <View style={connectionDotStyle} />
+            <View style={styles.connectionCardTextWrap}>
+              <View style={styles.connectionCardTitleRow}>
+                <Text style={[styles.sectionTitle, styles.connectionCardTitle, { color: theme.sectionTitle }]}>Connection</Text>
+                <View style={styles.connectionBadge}>
+                  <Text style={styles.connectionBadgeText}>{connectionBadgeLabel}</Text>
+                </View>
+              </View>
+              <Text style={[styles.metaText, { color: theme.text }]}>{connectionLabel}</Text>
+              <Text style={[styles.metaText, { color: theme.muted }]} numberOfLines={connectionExpanded ? 2 : 1}>
+                {connectionBusy ? 'Checking field backend...' : connectionDetail}
+              </Text>
+              <Text style={[styles.metaText, { color: theme.muted }]}>Path: {connectionPathLabel}</Text>
+            </View>
+          </View>
+          <View style={styles.connectionCardActions}>
+            <AppButton
+              label={connectionBusy ? 'Checking...' : 'Change'}
+              onPress={onOpenConnection}
+              disabled={connectionBusy}
+              compact
+              variant="secondary"
+              style={styles.connectionChangeButton}
+            />
+            <Text style={[styles.connectionChevron, { color: theme.muted }]}>{connectionExpanded ? 'Hide' : 'Show'}</Text>
+          </View>
+        </Pressable>
+        {connectionExpanded ? (
+          <View style={styles.connectionExpandedBlock}>
+            <Text style={[styles.metaText, { color: theme.muted }]}>
+              The app connects to the backend only. The backend manages the base station and robot link.
+            </Text>
+          </View>
+        ) : null}
+      </AppCard>
+
+
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Integration Status</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>A quick view of what is ready across the full system.</Text>
+        <View style={styles.readinessGrid}>
+          {readinessItems.map((item) => (
+            <View key={item.label} style={[styles.readinessItem, item.good ? styles.readinessItemGood : styles.readinessItemNeeds]}>
+              <Text style={[styles.quickLabel, { color: theme.muted }]}>{item.label}</Text>
+              <Text style={[styles.readinessValue, { color: item.good ? '#1f7a52' : '#9b5c12' }]}>{item.value}</Text>
+            </View>
+          ))}
+        </View>
+      </AppCard>
+
+
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
         <View style={styles.missionActionGrid}>
           <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
-          <ActionButton label="Start" onPress={() => performAction("mission-start")} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
+          <ActionButton label="Start" onPress={openPreflight} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
           <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} compact />
           <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} compact />
           <ActionButton label="Finish" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} compact />
@@ -522,84 +781,164 @@ export default function ControllerScreen({
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Operations</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Server-backed checks and individual system actions.</Text>
-        {groupedTestMenu.length ? groupedTestMenu.map(([groupName, actions]) => (
-          <View key={groupName} style={styles.opsGroup}>
-            <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>{groupName}</Text>
-            {actions.map((action) => {
-              const field = action.needsInput?.field;
-              const inputValue = field ? (testInputs[field] ?? "") : "";
-              const variant = action.caution === "danger"
-                ? "danger"
-                : action.caution === "safe"
-                  ? "secondary"
-                  : "primary";
-
-              return (
-                <View key={action.id} style={styles.opsActionRow}>
-                  <View style={styles.opsActionTextBlock}>
-                    <Text style={[styles.opsActionTitle, { color: theme.text }]}>
-                      {action.title}{action.shortcut ? ` (${action.shortcut})` : ""}
-                    </Text>
-                    {action.description ? <Text style={[styles.metaText, { color: theme.muted }]}>{action.description}</Text> : null}
-                  </View>
-                  {field ? (
-                    <View style={styles.opsInputRow}>
-                      <TextInput
-                        style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-                        value={inputValue}
-                        onChangeText={(value) => setTestInputValue(field, value)}
-                        placeholder={action.needsInput?.placeholder ?? action.needsInput?.label ?? action.title}
-                        placeholderTextColor={theme.muted}
-                        autoCapitalize="none"
-                      />
-                      <AppButton
-                        label={pendingAction === action.id ? "Running..." : "Run"}
-                        onPress={() => runServerTest(action)}
-                        disabled={pendingAction === action.id}
-                        compact
-                        variant={variant as "primary" | "secondary" | "success" | "danger"}
-                        style={styles.opsButton}
-                      />
-                    </View>
-                  ) : (
-                    <AppButton
-                      label={pendingAction === action.id ? "Running..." : "Run"}
-                      onPress={() => runServerTest(action)}
-                      disabled={pendingAction === action.id}
-                      compact
-                      variant={variant as "primary" | "secondary" | "success" | "danger"}
-                      style={styles.opsButton}
-                    />
-                  )}
-                </View>
-              );
-            })}
+        <Pressable style={styles.serviceToolsHeader} onPress={() => setServiceToolsVisible((current) => !current)}>
+          <View style={styles.serviceToolsHeaderText}>
+            <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Service Tools</Text>
+            <Text style={[styles.metaText, { color: theme.muted }]}>Advanced checks and command history for service work.</Text>
           </View>
-        )) : (
-          <Text style={[styles.metaText, { color: theme.muted }]}>No server operations available.</Text>
-        )}
-        {testResult ? <Text style={[styles.metaText, { color: theme.muted }]}>{testResult}</Text> : null}
+          <Text style={[styles.connectionChevron, { color: theme.muted }]}>{serviceToolsVisible ? 'Hide' : 'Show'}</Text>
+        </Pressable>
+
+        {serviceToolsVisible ? (
+          <View style={styles.serviceToolsBody}>
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Indoor Demo</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Drive indoors with manual control, then mark Spot A and Spot B when the robot reaches each demo position.</Text>
+        <View style={styles.demoButtonRow}>
+          <AppButton
+            label={pendingAction === "demo-mode-toggle" ? "Updating..." : (demoModeEnabled ? "Return to Live" : "Enable Demo")}
+            onPress={toggleDemoMode}
+            disabled={pendingAction === "demo-mode-toggle"}
+            variant={demoModeEnabled ? "secondary" : "primary"}
+            style={styles.demoPrimaryButton}
+          />
+          <AppButton
+            label="Open Manual Control"
+            onPress={() => setManualControlVisible(true)}
+            variant="outline"
+            style={styles.demoPrimaryButton}
+          />
+        </View>
+        <View style={styles.demoButtonRow}>
+          <AppButton
+            label={pendingAction === "demo-spot-start" ? "Marking Spot A..." : "Mark Spot A"}
+            onPress={() => markDemoSpot("start")}
+            disabled={!demoModeEnabled || pendingAction === "demo-spot-start"}
+            variant="secondary"
+            style={styles.demoPrimaryButton}
+          />
+          <AppButton
+            label={pendingAction === "demo-spot-end" ? "Marking Spot B..." : "Mark Spot B"}
+            onPress={() => markDemoSpot("end")}
+            disabled={!demoModeEnabled || pendingAction === "demo-spot-end"}
+            variant="secondary"
+            style={styles.demoPrimaryButton}
+          />
+        </View>
+        <View style={styles.demoSpotGrid}>
+          <View style={styles.demoSpotCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>Spot A</Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>{formatDemoSpot(demoSpots?.start)}</Text>
+            {demoSpotGpsStatus?.start?.ready === false ? (
+              <Text style={styles.error}>{demoSpotGpsStatus.start.reason}</Text>
+            ) : null}
+          </View>
+          <View style={styles.demoSpotCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>Spot B</Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>{formatDemoSpot(demoSpots?.end)}</Text>
+            {demoSpotGpsStatus?.end?.ready === false ? (
+              <Text style={styles.error}>{demoSpotGpsStatus.end.reason}</Text>
+            ) : null}
+          </View>
+        </View>
+        <AppButton
+          label={pendingAction === "demo-path" ? "Building Demo Path..." : "Build Demo Path"}
+          onPress={() => buildDemoPath(false)}
+          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override"}
+          variant="primary"
+          style={styles.demoBuildButton}
+        />
+        <AppButton
+          label={pendingAction === "demo-path-override" ? "Overriding GPS Check..." : "Build Demo Path (Service Override)"}
+          onPress={() => buildDemoPath(true)}
+          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override"}
+          variant="outline"
+          style={styles.demoBuildButton}
+        />
+        {demoModeEnabled ? (
+          <Text style={[styles.metaText, { color: theme.muted }]}>Demo mode keeps autonomy locked while manual driving and safe stop actions stay available.</Text>
+        ) : null}
       </AppCard>
 
-      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Recent Commands</Text>
-        {recentCommands.length ? recentCommands.map((entry) => (
-          <View key={entry.commandId} style={styles.commandHistoryRow}>
-            <View style={styles.commandHistoryTextBlock}>
-              <Text style={[styles.commandHistoryTitle, { color: theme.text }]}>{entry.cmd ?? entry.commandId}</Text>
-              <Text style={[styles.metaText, { color: theme.muted }]}>
-                {entry.commandId} | {entry.transport?.stage ?? entry.status ?? "unknown"}
-                {entry.transport?.ackCategory ? ` | ${entry.transport.ackCategory}` : ""}
-              </Text>
-              {entry.error ? <Text style={styles.error}>{entry.error}</Text> : null}
+            <Text style={[styles.metaText, { color: theme.muted }]}>Indoor demo tools are kept here for service use.</Text>
+            {groupedTestMenu.length ? groupedTestMenu.map(([groupName, actions]) => (
+              <View key={groupName} style={styles.opsGroup}>
+                <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>{groupName}</Text>
+                {actions.map((action) => {
+                  const field = action.needsInput?.field;
+                  const inputValue = field ? (testInputs[field] ?? "") : "";
+                  const variant = action.caution === "danger"
+                    ? "danger"
+                    : action.caution === "safe"
+                      ? "secondary"
+                      : "primary";
+
+                  return (
+                    <View key={action.id} style={styles.opsActionRow}>
+                      <View style={styles.opsActionTextBlock}>
+                        <Text style={[styles.opsActionTitle, { color: theme.text }]}>
+                          {action.title}{action.shortcut ? ` (${action.shortcut})` : ""}
+                        </Text>
+                        {action.description ? <Text style={[styles.metaText, { color: theme.muted }]}>{action.description}</Text> : null}
+                      </View>
+                      {field ? (
+                        <View style={styles.opsInputRow}>
+                          <TextInput
+                            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+                            value={inputValue}
+                            onChangeText={(value) => setTestInputValue(field, value)}
+                            placeholder={action.needsInput?.placeholder ?? action.needsInput?.label ?? action.title}
+                            placeholderTextColor={theme.muted}
+                            autoCapitalize="none"
+                          />
+                          <AppButton
+                            label={pendingAction === action.id ? "Running..." : "Run"}
+                            onPress={() => runServerTest(action)}
+                            disabled={pendingAction === action.id}
+                            compact
+                            variant={variant as "primary" | "secondary" | "success" | "danger"}
+                            style={styles.opsButton}
+                          />
+                        </View>
+                      ) : (
+                        <AppButton
+                          label={pendingAction === action.id ? "Running..." : "Run"}
+                          onPress={() => runServerTest(action)}
+                          disabled={pendingAction === action.id}
+                          compact
+                          variant={variant as "primary" | "secondary" | "success" | "danger"}
+                          style={styles.opsButton}
+                        />
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            )) : (
+              <Text style={[styles.metaText, { color: theme.muted }]}>No server operations available.</Text>
+            )}
+            {testResult ? <Text style={[styles.metaText, { color: theme.muted }]}>{testResult}</Text> : null}
+
+            <View style={styles.serviceToolsHistoryBlock}>
+              <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>Recent Commands</Text>
+              {recentCommands.length ? recentCommands.map((entry) => (
+                <View key={entry.commandId} style={styles.commandHistoryRow}>
+                  <View style={styles.commandHistoryTextBlock}>
+                    <Text style={[styles.commandHistoryTitle, { color: theme.text }]}>{entry.cmd ?? entry.commandId}</Text>
+                    <Text style={[styles.metaText, { color: theme.muted }]}>
+                      {entry.commandId} | {entry.transport?.stage ?? entry.status ?? "unknown"}
+                      {entry.transport?.ackCategory ? ` | ${entry.transport.ackCategory}` : ""}
+                    </Text>
+                    {entry.error ? <Text style={styles.error}>{entry.error}</Text> : null}
+                  </View>
+                  <Text style={[styles.noteMeta, { color: theme.muted }]}>{new Date(entry.updatedAt ?? entry.at ?? Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</Text>
+                </View>
+              )) : (
+                <Text style={[styles.metaText, { color: theme.muted }]}>No command activity yet.</Text>
+              )}
             </View>
-            <Text style={[styles.noteMeta, { color: theme.muted }]}>{new Date(entry.updatedAt ?? entry.at ?? Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</Text>
           </View>
-        )) : (
-          <Text style={[styles.metaText, { color: theme.muted }]}>No command activity yet.</Text>
-        )}
+        ) : null}
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -633,6 +972,60 @@ export default function ControllerScreen({
       </AppCard>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
+
+      <Modal
+        visible={preflightVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPreflightVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderText}>
+                <Text style={styles.modalTitle}>Preflight Check</Text>
+                <Text style={styles.modalSubtitle}>A quick review before starting the mission.</Text>
+              </View>
+              <Pressable style={styles.modalCloseButton} onPress={() => setPreflightVisible(false)}>
+                <Text style={styles.modalCloseButtonText}>Close</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.preflightList}>
+              {preflightItems.map((item) => (
+                <View key={item.label} style={styles.preflightRow}>
+                  <View style={[styles.preflightDot, item.good ? styles.preflightDotGood : styles.preflightDotNeeds]} />
+                  <View style={styles.preflightTextWrap}>
+                    <Text style={styles.preflightTitle}>{item.label}</Text>
+                    <Text style={styles.modalStatusText}>{item.detail}</Text>
+                  </View>
+                  <Text style={[styles.preflightStateText, item.good ? styles.preflightStateGood : styles.preflightStateNeeds]}>
+                    {item.good ? 'Ready' : 'Check'}
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            {connectionReason ? <Text style={styles.modalStatusText}>{connectionReason}</Text> : null}
+
+            <View style={styles.preflightActions}>
+              <AppButton
+                label="Start Mission"
+                onPress={confirmMissionStart}
+                disabled={!missionStartReady || pendingAction === 'mission-start'}
+                variant="success"
+                style={styles.preflightButton}
+              />
+              <AppButton
+                label="Not Yet"
+                onPress={() => setPreflightVisible(false)}
+                variant="secondary"
+                style={styles.preflightButton}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={manualControlVisible}
@@ -767,6 +1160,104 @@ const styles = StyleSheet.create({
   statusPillCritical: {
     backgroundColor: '#b63d3d',
   },
+  connectionCard: {
+    marginTop: 2,
+  },
+  connectionCardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  connectionCardInfo: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  connectionCardTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  connectionCardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  connectionCardTitle: {
+    marginBottom: 0,
+  },
+  connectionDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    marginTop: 5,
+  },
+  connectionDotConnected: {
+    backgroundColor: '#1f9d64',
+  },
+  connectionDotFallback: {
+    backgroundColor: '#d98b1f',
+  },
+  connectionDotError: {
+    backgroundColor: '#c84141',
+  },
+  connectionDotConnecting: {
+    backgroundColor: '#5b88b8',
+  },
+  connectionBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: '#eef4fb',
+    borderWidth: 1,
+    borderColor: '#d7e2ee',
+  },
+  connectionBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#315781',
+    textTransform: 'uppercase',
+  },
+  connectionCardActions: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  connectionChevron: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#63788e',
+  },
+  connectionExpandedBlock: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#e3eaf2',
+  },
+  serviceToolsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  serviceToolsHeaderText: {
+    flex: 1,
+    gap: 2,
+  },
+  serviceToolsBody: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#e3eaf2',
+    gap: 8,
+  },
+  serviceToolsHistoryBlock: {
+    marginTop: 10,
+    gap: 8,
+  },
+  connectionChangeButton: {
+    minWidth: 92,
+  },
   card: {},
   sectionTitle: {
     fontSize: 18,
@@ -797,6 +1288,39 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
+  },
+  recoveryCard: {
+    borderColor: '#dce7d2',
+    backgroundColor: '#f8fcf4',
+  },
+  recoveryTitle: {
+    marginBottom: 6,
+  },
+  readinessGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 10,
+  },
+  readinessItem: {
+    width: '47%',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
+  readinessItemGood: {
+    borderColor: '#d4eadf',
+    backgroundColor: '#f4fbf7',
+  },
+  readinessItemNeeds: {
+    borderColor: '#f1dfbd',
+    backgroundColor: '#fff9ef',
+  },
+  readinessValue: {
+    fontSize: 14,
+    fontWeight: '800',
   },
   quickItem: {
     width: "47%",
@@ -872,6 +1396,31 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     minWidth: 168,
   },
+  demoButtonRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+  },
+  demoPrimaryButton: {
+    flex: 1,
+  },
+  demoSpotGrid: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+  },
+  demoSpotCard: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#e1e8f0",
+    borderRadius: 12,
+    padding: 12,
+    gap: 4,
+    backgroundColor: "#f8fbff",
+  },
+  demoBuildButton: {
+    marginTop: 10,
+  },
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(19, 35, 58, 0.62)",
@@ -922,6 +1471,55 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#63788e",
     flexWrap: "wrap",
+  },
+  preflightList: {
+    gap: 10,
+  },
+  preflightRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 4,
+  },
+  preflightDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    marginTop: 6,
+  },
+  preflightDotGood: {
+    backgroundColor: '#1f9d64',
+  },
+  preflightDotNeeds: {
+    backgroundColor: '#d98b1f',
+  },
+  preflightTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  preflightTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#13233a',
+  },
+  preflightStateText: {
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  preflightStateGood: {
+    color: '#1f7a52',
+  },
+  preflightStateNeeds: {
+    color: '#9b5c12',
+  },
+  preflightActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 8,
+  },
+  preflightButton: {
+    flex: 1,
   },
   alertRow: {
     borderRadius: 12,
@@ -1016,6 +1614,19 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -51,6 +51,8 @@ type CoverageResponse = {
   };
 };
 
+
+
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -84,6 +86,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setPlannedPathDistanceM(0);
     setCoverageCells([]);
   };
+
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
     const earthRadiusM = 6371000;
@@ -408,7 +411,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                           { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
                         ]}
                       >
-                        <Text style={[styles.pathArrowText, { fontSize: Math.max(12, arrowSize - 4), lineHeight: Math.max(12, arrowSize - 4) }]}>â–²</Text>
+                        <MaterialCommunityIcons
+                          name="navigation"
+                          size={Math.max(12, arrowSize - 4)}
+                          color="#1f5f9f"
+                          style={{ transform: [{ rotate: '45deg' }] }}
+                        />
                       </View>
                     </Marker>
                   ))}
@@ -439,23 +447,25 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             />
           </View>
           <Text style={[styles.modeChipSub, { color: theme.muted }]} numberOfLines={1}>
-            Salt {saltPct}% Â· Brine {brinePct}%
+            {`Salt ${saltPct}% · Brine ${brinePct}%`}
           </Text>
         </View>
-        <AppButton label={mapType === 'standard' ? 'Satellite' : 'Standard'} onPress={toggleMapType} variant="outline" style={styles.mapTypeAction}>
-          <MaterialCommunityIcons
-            name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
-            size={16}
-            color="#2c6fb7"
-          />
-        </AppButton>
+        <View style={styles.modeChipActions}>
+          <AppButton label={mapType === 'standard' ? 'Satellite' : 'Standard'} onPress={toggleMapType} variant="outline" style={styles.mapTypeAction}>
+            <MaterialCommunityIcons
+              name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
+              size={16}
+              color="#2c6fb7"
+            />
+          </AppButton>
+        </View>
       </View>
 
       <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
         <Text style={[styles.overlayText, { color: theme.text }]}>{message}</Text>
-        <Text style={styles.stepText}>Draw area Â· Submit area Â· Plan path</Text>
+        <Text style={styles.stepText}>Draw area · Submit area · Plan path</Text>
         {plannedPath.length > 1 ? (
-          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points Â· {(plannedPathDistanceM / 1000).toFixed(2)} km Â· Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
+          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points · {(plannedPathDistanceM / 1000).toFixed(2)} km · Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
         ) : null}
         <View style={styles.actionRow}>
           <AppButton
@@ -526,14 +536,15 @@ const styles = StyleSheet.create({
   },
   overlay: {
     position: 'absolute',
-    left: 16,
-    right: 16,
-    bottom: 20,
+    left: 14,
+    right: 14,
+    bottom: 18,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
-    borderRadius: 14,
-    padding: 14,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   zoomStack: {
     position: 'absolute',
@@ -549,13 +560,13 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     top: 64,
-    width: 176,
+    width: 160,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     gap: 8,
   },
   modeChipTextBlock: {
@@ -566,10 +577,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  modeChipActions: {
+    gap: 8,
+  },
   mapTypeAction: {
     minHeight: 40,
     minWidth: 0,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
   },
   modeChipText: {
     fontSize: 12,
@@ -585,34 +599,34 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   overlayText: {
-    marginBottom: 6,
+    marginBottom: 4,
     color: '#16324f',
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '600',
   },
   stepText: {
     color: '#4f6275',
-    fontSize: 12,
-    marginBottom: 8,
+    fontSize: 11,
+    marginBottom: 6,
     fontWeight: '600',
   },
   actionRow: {
     flexDirection: 'row',
-    gap: 8,
-    marginTop: 8,
+    gap: 6,
+    marginTop: 6,
   },
   actionFill: {
     flex: 1,
   },
   secondaryAction: {
     flex: 1,
-    minHeight: 38,
+    minHeight: 34,
   },
   pathMetaText: {
     color: '#1f5f9f',
-    fontSize: 12,
-    marginBottom: 8,
+    fontSize: 11,
+    marginBottom: 6,
     fontWeight: '600',
   },
   pathArrow: {
@@ -626,7 +640,7 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   statefulButton: {
-    minHeight: 40,
+    minHeight: 36,
   },
   buttonReady: {
     backgroundColor: '#2d8a65',
@@ -641,3 +655,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#9eabb8',
   },
 });
+
+
+
+
+
+

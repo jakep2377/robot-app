@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+﻿import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -20,29 +20,40 @@ const helpSections: HelpSection[] = [
     icon: "check-circle-outline",
     content: [
       "Open Area Map and tap Draw Area.",
-      "Pick the first corner, then the opposite corner.",
-      "Submit the area and plan the path.",
-      "Use Controller to push waypoints and run the mission.",
-      "Open Manual Control only when needed.",
+      "Set the work area, then tap Submit Area.",
+      "Plan the path for the current area.",
+      "Open Controller to commit the path and start the mission.",
+      "Use Manual Control only when direct driving is needed.",
+    ],
+  },
+  {
+    title: "Connection",
+    icon: "lan-connect",
+    content: [
+      "The app connects to the backend only.",
+      "The backend manages the base station and robot link.",
+      "Field network is the normal path.",
+      "Direct backup means the backend is using the base station fallback path.",
+      "Remote fallback should only be used when a field backend is not available.",
     ],
   },
   {
     title: "Area Map",
     icon: "map-marker-path",
     content: [
-      "Drag corner markers to adjust the work area.",
-      "Use + and - to zoom.",
-      "Clear removes the current area.",
-      "Plan Path uses the current salt and brine values.",
+      "Drag the corner markers to shape the work area.",
+      "Submit Area saves the boundary for planning.",
+      "Plan Path builds the coverage route with the current salt and brine values.",
+      "Use Clear to remove the current area and start over.",
     ],
   },
   {
     title: "Controller",
     icon: "gamepad-variant-outline",
     content: [
-      "Quick Status shows mission, coverage, robot state, and server readiness.",
-      "Mission Controls handle waypoint push and mission actions.",
-      "Emergency controls cover E-Stop and Reset.",
+      "Quick Status shows mission, coverage, and system readiness.",
+      "Integration Status shows backend, base station, robot link, GPS, and waypoints.",
+      "Mission Controls handle commit, start, pause, resume, complete, and abort.",
       "Field Notes are for short handoff notes.",
     ],
   },
@@ -51,26 +62,27 @@ const helpSections: HelpSection[] = [
     icon: "controller-classic-outline",
     content: [
       "Open Manual Control from Controller.",
-      "Drive with FWD, LEFT, RIGHT, BACK, and STOP.",
-      "Use direct drive only when needed.",
+      "Use FWD, LEFT, RIGHT, BACK, and STOP for short direct moves.",
+      "Use E-Stop any time an immediate stop is needed.",
     ],
   },
   {
     title: "Weather",
     icon: "weather-snowy",
     content: [
-      "Check current conditions and recommended mix.",
-      "Tap a forecast time or enter a manual service time.",
-      "Schedule Service requests location and alerts only when needed.",
+      "Weather suggests a treatment mix based on current or forecast conditions.",
+      "Look Ahead helps choose a service window over the next several days.",
+      "Schedule Service asks for phone location and alerts only when needed.",
     ],
   },
   {
     title: "Troubleshooting",
     icon: "lightbulb-on-outline",
     content: [
-      "If commands do not execute, verify the server is Ready.",
-      "If telemetry is stale, confirm robot and bridge link health.",
-      "If a mission action is disabled, a backend safety gate is blocking it.",
+      "If Start Mission is blocked, check Integration Status first.",
+      "If the robot link is stale, verify the base station and LoRa path.",
+      "If a mission was restored after restart, review the system before resuming.",
+      "If something still looks off, use the server console for deeper testing.",
     ],
   },
 ];

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
@@ -64,9 +64,9 @@ async function discoverBestServer(preferredUrl?: string | null) {
       state: {
         serverUrl: local.success.serverUrl,
         mode: 'local' as const,
-        label: 'Local backend',
+        label: 'Field backend',
         status: 'connected' as const,
-        detail: `Connected to backend in ${local.success.latencyMs} ms`,
+        detail: `Connected to field backend in ${local.success.latencyMs} ms`,
       },
       probes: local.results,
     };
@@ -78,9 +78,9 @@ async function discoverBestServer(preferredUrl?: string | null) {
       state: {
         serverUrl: cloud.serverUrl,
         mode: 'cloud' as const,
-        label: 'Cloud fallback',
+        label: 'Remote fallback',
         status: 'fallback' as const,
-        detail: `Using cloud backend in ${cloud.latencyMs} ms`,
+        detail: `Using remote backend in ${cloud.latencyMs} ms`,
       },
       probes: [...local.results, cloud],
     };
@@ -98,53 +98,14 @@ async function discoverBestServer(preferredUrl?: string | null) {
   };
 }
 
-function ConnectionBar({
-  connection,
-  busy,
-  onOpen,
-}: {
-  connection: ConnectionState;
-  busy: boolean;
-  onOpen: () => void;
-}) {
-  const insets = useSafeAreaInsets();
-  const dotStyle = [
-    styles.connectionDot,
-    connection.status === 'connected'
-      ? styles.connectionDotConnected
-      : connection.status === 'fallback'
-        ? styles.connectionDotFallback
-        : connection.status === 'error'
-          ? styles.connectionDotError
-          : styles.connectionDotConnecting,
-  ];
-
-  return (
-    <View style={[styles.connectionBar, { paddingTop: insets.top + 8 }]}>
-      <View style={styles.connectionInfo}>
-        <View style={dotStyle} />
-        <View style={styles.connectionTextWrap}>
-          <Text style={styles.connectionTitle}>{connection.label}</Text>
-          <Text style={styles.connectionDetail} numberOfLines={1}>
-            {busy ? 'Checking nearby server...' : connection.detail}
-          </Text>
-        </View>
-      </View>
-      <Pressable style={styles.connectionButton} onPress={onOpen}>
-        {busy ? <ActivityIndicator size="small" color="#1f5f9f" /> : <Text style={styles.connectionButtonText}>Change</Text>}
-      </Pressable>
-    </View>
-  );
-}
-
 export default function App() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
   const [connection, setConnection] = useState<ConnectionState>({
     serverUrl: DEFAULT_CLOUD_SERVER_URL,
     mode: 'discovering',
-    label: 'Searching for backend',
+    label: 'Finding field backend',
     status: 'connecting',
-    detail: 'Looking for a local backend server first.',
+    detail: 'Looking for a nearby field backend first.',
   });
   const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
@@ -195,7 +156,7 @@ export default function App() {
     setConnection({
       serverUrl: candidate,
       mode: 'manual',
-      label: 'Manual server',
+      label: 'Manual backend',
       status: 'connected',
       detail: `Connected to ${candidate}`,
     });
@@ -209,7 +170,7 @@ export default function App() {
     setConnectionBusy(false);
 
     if (!result.ok) {
-      setConnectionError(result.error ?? 'Cloud fallback is not reachable.');
+      setConnectionError(result.error ?? 'Remote fallback is not reachable.');
       return;
     }
 
@@ -218,9 +179,9 @@ export default function App() {
     setConnection({
       serverUrl: result.serverUrl,
       mode: 'cloud',
-      label: 'Cloud fallback',
+      label: 'Remote fallback',
       status: 'fallback',
-      detail: `Using cloud backend in ${result.latencyMs} ms`,
+      detail: `Using remote backend in ${result.latencyMs} ms`,
     });
     setConnectionModalVisible(false);
   };
@@ -250,7 +211,6 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar style="dark" translucent backgroundColor="transparent" />
       <View style={styles.appShell}>
-        <ConnectionBar connection={connection} busy={connectionBusy} onOpen={() => setConnectionModalVisible(true)} />
         <NavigationContainer>
           <Tab.Navigator screenOptions={tabScreenOptions}>
             <Tab.Screen
@@ -269,6 +229,12 @@ export default function App() {
                   brinePct={brinePct}
                   setSaltPct={setSaltPct}
                   setBrinePct={setBrinePct}
+                  connectionLabel={connection.label}
+                  connectionStatus={connection.status}
+                  connectionDetail={connection.detail}
+                  connectionMode={connection.mode}
+                  connectionBusy={connectionBusy}
+                  onOpenConnection={() => setConnectionModalVisible(true)}
                 />
               )}
             </Tab.Screen>
@@ -332,7 +298,7 @@ export default function App() {
             <Text style={styles.modalStatus}>Current: {connection.label}</Text>
             <Text style={styles.modalDetail}>{connection.detail}</Text>
 
-            <Text style={styles.inputLabel}>Manual server URL</Text>
+            <Text style={styles.inputLabel}>Manual backend URL</Text>
             <TextInput
               style={styles.input}
               value={manualServerUrl}
@@ -347,13 +313,13 @@ export default function App() {
 
             <View style={styles.buttonStack}>
               <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => runDiscovery(serverUrl)} disabled={connectionBusy}>
-                <Text style={styles.actionPrimaryText}>Find Local Backend</Text>
+                <Text style={styles.actionPrimaryText}>Find Field Backend</Text>
               </Pressable>
               <Pressable style={styles.actionButton} onPress={saveManualServer} disabled={connectionBusy}>
                 <Text style={styles.actionSecondaryText}>Use Manual Address</Text>
               </Pressable>
               <Pressable style={styles.actionButton} onPress={useCloudFallback} disabled={connectionBusy}>
-                <Text style={styles.actionSecondaryText}>Use Cloud Fallback</Text>
+                <Text style={styles.actionSecondaryText}>Use Remote Fallback</Text>
               </Pressable>
             </View>
           </View>
@@ -367,69 +333,6 @@ const styles = StyleSheet.create({
   appShell: {
     flex: 1,
     backgroundColor: '#eef4fb',
-  },
-  connectionBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingBottom: 10,
-    backgroundColor: '#f8fbff',
-    borderBottomColor: '#d7e2ee',
-    borderBottomWidth: 1,
-  },
-  connectionInfo: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  connectionDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 999,
-  },
-  connectionDotConnected: {
-    backgroundColor: '#1f9d64',
-  },
-  connectionDotFallback: {
-    backgroundColor: '#d98b1f',
-  },
-  connectionDotError: {
-    backgroundColor: '#c84141',
-  },
-  connectionDotConnecting: {
-    backgroundColor: '#5b88b8',
-  },
-  connectionTextWrap: {
-    flex: 1,
-  },
-  connectionTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#213c5a',
-  },
-  connectionDetail: {
-    marginTop: 2,
-    fontSize: 12,
-    color: '#64809d',
-  },
-  connectionButton: {
-    marginLeft: 12,
-    minWidth: 76,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#c6d7e8',
-    backgroundColor: '#ffffff',
-  },
-  connectionButtonText: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#21466d',
   },
   modalBackdrop: {
     flex: 1,
