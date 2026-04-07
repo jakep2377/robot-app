@@ -282,6 +282,7 @@ export default function ControllerScreen({
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
   const refreshInFlight = useRef(false);
+  const heldManualCommand = useRef<string | null>(null);
 
   const refresh = async () => {
     if (refreshInFlight.current) {
@@ -371,6 +372,22 @@ export default function ControllerScreen({
     }
   };
 
+  const beginHeldManualCommand = async (command: string) => {
+    if (heldManualCommand.current === command || pendingAction) {
+      return;
+    }
+    heldManualCommand.current = command;
+    await performCommand(command);
+  };
+
+  const releaseHeldManualCommand = async () => {
+    if (!heldManualCommand.current || pendingAction) {
+      heldManualCommand.current = null;
+      return;
+    }
+    heldManualCommand.current = null;
+    await performCommand("STOP");
+  };
   const performAction = async (actionId: string) => {
     const endpoint = MISSION_ENDPOINTS[actionId];
     if (!endpoint) {
@@ -1040,7 +1057,7 @@ export default function ControllerScreen({
                 <Text style={styles.modalTitle}>Manual Control</Text>
                 <Text style={styles.modalSubtitle}>Direct drive controls.</Text>
               </View>
-              <Pressable style={styles.modalCloseButton} onPress={() => setManualControlVisible(false)}>
+              <Pressable style={styles.modalCloseButton} onPress={() => { void releaseHeldManualCommand(); setManualControlVisible(false); }}>
                 <Text style={styles.modalCloseButtonText}>Close</Text>
               </Pressable>
             </View>
@@ -1048,21 +1065,25 @@ export default function ControllerScreen({
             <Text style={styles.modalStatusText}>Mission {missionState} | Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} | Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
 
             <View style={styles.dpad}>
-              <Pressable style={styles.commandButton} onPress={() => performCommand("FORWARD")}>
+              <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("FORWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
+
                 <Text style={styles.commandText}>{pendingAction === "FORWARD" ? "FWD..." : "FWD"}</Text>
               </Pressable>
               <View style={styles.row}>
-                <Pressable style={styles.commandButton} onPress={() => performCommand("LEFT")}>
+                <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("LEFT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
+
                   <Text style={styles.commandText}>{pendingAction === "LEFT" ? "LEFT..." : "LEFT"}</Text>
                 </Pressable>
                 <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
                   <Text style={styles.commandText}>{pendingAction === "STOP" ? "STOP..." : "STOP"}</Text>
                 </Pressable>
-                <Pressable style={styles.commandButton} onPress={() => performCommand("RIGHT")}>
+                <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("RIGHT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
+
                   <Text style={styles.commandText}>{pendingAction === "RIGHT" ? "RIGHT..." : "RIGHT"}</Text>
                 </Pressable>
               </View>
-              <Pressable style={styles.commandButton} onPress={() => performCommand("BACKWARD")}>
+              <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("BACKWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
+
                 <Text style={styles.commandText}>{pendingAction === "BACKWARD" ? "BACK..." : "BACK"}</Text>
               </Pressable>
             </View>
@@ -1614,6 +1635,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 });
+
 
 
 
