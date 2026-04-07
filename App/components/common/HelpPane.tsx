@@ -1,4 +1,4 @@
-﻿import React, { useState } from "react";
+import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -107,7 +107,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
         ) : null}
       </View>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
         {helpSections.map((section, index) => (
           <AppCard key={section.title} style={styles.sectionContainer} contentStyle={styles.sectionCardContent}>
             <Pressable style={styles.sectionHeader} onPress={() => setExpandedIndex(expandedIndex === index ? null : index)}>
@@ -162,8 +162,11 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
+  },
+  contentContainer: {
     paddingHorizontal: 16,
     paddingTop: 16,
+    paddingBottom: 8,
   },
   sectionContainer: {
     marginBottom: 12,
@@ -208,3 +211,5 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 });
+
+

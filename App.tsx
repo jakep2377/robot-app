@@ -112,6 +112,14 @@ export default function App() {
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [baseStationUrl, setBaseStationUrl] = useState('http://192.168.4.1');
+  const [baseStationWifiSsid, setBaseStationWifiSsid] = useState('');
+  const [baseStationWifiPassword, setBaseStationWifiPassword] = useState('');
+  const [baseStationBackendUrl, setBaseStationBackendUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
+  const [baseStationSetupBusy, setBaseStationSetupBusy] = useState(false);
+  const [baseStationSetupError, setBaseStationSetupError] = useState<string | null>(null);
+  const [baseStationSetupInfo, setBaseStationSetupInfo] = useState<string | null>(null);
+  const [baseStationSetupStatus, setBaseStationSetupStatus] = useState<BaseStationSetupStatus | null>(null);
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
 
@@ -140,6 +148,59 @@ export default function App() {
       setConnectionError('Unable to complete server discovery.');
     });
   }, []);
+
+  useEffect(() => {
+    setBaseStationBackendUrl(serverUrl);
+  }, [serverUrl]);
+
+  const inspectBaseStationSetup = async () => {
+    setBaseStationSetupBusy(true);
+    setBaseStationSetupError(null);
+    setBaseStationSetupInfo(null);
+    try {
+      const result = await probeBaseStationSetup(baseStationUrl, 2500);
+      if (!result.ok) {
+        setBaseStationSetupStatus(null);
+        setBaseStationSetupError(result.error ?? 'Unable to reach the base station setup AP.');
+        return;
+      }
+      setBaseStationSetupStatus(result.payload ?? null);
+      if (result.payload?.savedSsid) setBaseStationWifiSsid(result.payload.savedSsid);
+      if (result.payload?.backendUrl) setBaseStationBackendUrl(result.payload.backendUrl);
+      setBaseStationSetupInfo(`Connected to setup AP in ${result.latencyMs} ms.`);
+    } finally {
+      setBaseStationSetupBusy(false);
+    }
+  };
+
+  const saveBaseStationSetup = async () => {
+    if (!baseStationWifiSsid.trim()) {
+      setBaseStationSetupError('Enter the Wi-Fi name the base station should join.');
+      return;
+    }
+
+    setBaseStationSetupBusy(true);
+    setBaseStationSetupError(null);
+    setBaseStationSetupInfo(null);
+    try {
+      const response = await configureBaseStationSetup(baseStationUrl, {
+        ssid: baseStationWifiSsid.trim(),
+        password: baseStationWifiPassword,
+        backendUrl: baseStationBackendUrl.trim() || serverUrl,
+      });
+      setBaseStationSetupInfo(response.message ?? 'Wi-Fi saved. The base station is restarting into normal mode.');
+      setBaseStationSetupStatus((previous) => ({
+        ...(previous ?? {}),
+        configured: true,
+        savedSsid: baseStationWifiSsid.trim(),
+        backendUrl: baseStationBackendUrl.trim() || serverUrl,
+      }));
+    } catch (error) {
+      setBaseStationSetupError(error instanceof Error ? error.message : 'Unable to save the base station setup.');
+    } finally {
+      setBaseStationSetupBusy(false);
+    }
+  };
 
   const saveManualServer = async () => {
     const candidate = normalizeServerUrl(manualServerUrl);
@@ -347,6 +408,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderWidth: 1,
     borderColor: '#dce6f0',
+    maxHeight: '88%',
+  },
+  modalScrollContent: {
+    paddingBottom: 6,
   },
   modalHeader: {
     flexDirection: 'row',
@@ -436,7 +501,52 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#21466d',
   },
+  setupSection: {
+    marginTop: 24,
+    paddingTop: 18,
+    borderTopWidth: 1,
+    borderTopColor: '#dce6f0',
+  },
+  setupTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#213c5a',
+  },
+  inlineStrong: {
+    fontWeight: '800',
+    color: '#315781',
+  },
+  setupStatusCard: {
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 14,
+    backgroundColor: '#f4f8fc',
+    borderWidth: 1,
+    borderColor: '#d7e2ee',
+  },
+  setupStatusTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#21466d',
+  },
+  setupStatusText: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#5f7893',
+  },
+  infoText: {
+    marginTop: 10,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#2d8a65',
+  },
 });
+
+
+
+
 
 
 
