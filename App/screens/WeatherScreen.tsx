@@ -131,7 +131,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [showLookAhead, setShowLookAhead] = useState(false);
 
   const loadWeather = async (location: LocationState) => {
-    const TEST_CASE: "none" | "light" | "medium" | "heavy" | "severe" = "light";
+    const TEST_CASE: "none" | "light" | "medium" | "heavy" | "severe" = "heavy";
 
     setLoading(true);
     
@@ -753,8 +753,8 @@ const styles = StyleSheet.create({
   lookAheadMenuText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
   lookAheadMenuTextActive: { color: "#ffffff" },
   lookAheadList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10 },
-  lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#eef4fb" },
+  lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10, backgroundColor: "#f3f5f8", borderWidth: 1, borderColor: "#cfd9e4", borderRadius: 10},
+  lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#2c6fb7" },
   lookAheadLabel: { color: "#63788e", fontSize: 11, fontWeight: "700" },
   lookAheadTemp: { color: "#1f3550", fontSize: 18, fontWeight: "700" },
   lookAheadCondition: { color: "#4f6478", fontSize: 12, textTransform: "capitalize" },
