@@ -666,10 +666,10 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
                   }}
                 >
                   <View>
-                    <Text style={styles.lookAheadLabel}>{item.label}</Text>
-                    <Text style={styles.lookAheadTemp}>{item.tempText}</Text>
-                    <Text style={styles.lookAheadCondition}>{item.condition}</Text>
-                    <Text style={styles.lookAheadMix}>{item.mixText}</Text>
+                    <Text style={[styles.lookAheadLabel, item.at === selectedLookAheadAt ? styles.lookAheadLabelActive : null]}>{item.label}</Text>
+                    <Text style={[styles.lookAheadTemp, item.at === selectedLookAheadAt ? styles.lookAheadTempActive : null]}>{item.tempText}</Text>
+                    <Text style={[styles.lookAheadCondition, item.at === selectedLookAheadAt ? styles.lookAheadConditionActive : null]}>{item.condition}</Text>
+                    <Text style={[styles.lookAheadMix, item.at === selectedLookAheadAt ? styles.lookAheadMixActive : null]}>{item.mixText}</Text>
                   </View>
                 </AppButton>
               ))}
@@ -756,9 +756,13 @@ const styles = StyleSheet.create({
   lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10, backgroundColor: "#f3f5f8", borderWidth: 1, borderColor: "#cfd9e4", borderRadius: 10},
   lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#2c6fb7" },
   lookAheadLabel: { color: "#63788e", fontSize: 11, fontWeight: "700" },
+  lookAheadLabelActive: { color: "#ffffff" },
   lookAheadTemp: { color: "#1f3550", fontSize: 18, fontWeight: "700" },
+  lookAheadTempActive: { color: "#ffffff" },
   lookAheadCondition: { color: "#4f6478", fontSize: 12, textTransform: "capitalize" },
+  lookAheadConditionActive: { color: "#ffffff" },
   lookAheadMix: { color: "#2c6fb7", fontSize: 12, fontWeight: "700" },
+  lookAheadMixActive: { color: "#ffffff" },
   manualScheduleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   manualScheduleInput: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 16, fontWeight: "700" },
   manualScheduleButton: { minWidth: 96, minHeight: 42 },
