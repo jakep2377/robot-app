@@ -40,6 +40,7 @@ export type BaseStationSetupStatus = {
   savedSsid?: string;
   backendUrl?: string;
   wifiLinkState?: string;
+  boardApiKeySet?: boolean;
 };
 
 export type BaseStationSetupProbeResult = {
@@ -195,6 +196,7 @@ export async function configureBaseStationSetup(baseStationUrl: string, body: {
   ssid: string;
   password: string;
   backendUrl?: string;
+  boardApiKey?: string;
 }) {
   const response = await fetchWithTimeout(`${normalizeBaseStationUrl(baseStationUrl)}/setup/network`, {
     method: 'POST',

@@ -116,6 +116,7 @@ export default function App() {
   const [baseStationWifiSsid, setBaseStationWifiSsid] = useState('');
   const [baseStationWifiPassword, setBaseStationWifiPassword] = useState('');
   const [baseStationBackendUrl, setBaseStationBackendUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
+  const [baseStationBoardApiKey, setBaseStationBoardApiKey] = useState((typeof process.env.EXPO_PUBLIC_BOARD_API_KEY === 'string' && process.env.EXPO_PUBLIC_BOARD_API_KEY.trim()) || '');
   const [baseStationSetupBusy, setBaseStationSetupBusy] = useState(false);
   const [baseStationSetupError, setBaseStationSetupError] = useState<string | null>(null);
   const [baseStationSetupInfo, setBaseStationSetupInfo] = useState<string | null>(null);
@@ -187,6 +188,7 @@ export default function App() {
         ssid: baseStationWifiSsid.trim(),
         password: baseStationWifiPassword,
         backendUrl: baseStationBackendUrl.trim() || serverUrl,
+        boardApiKey: baseStationBoardApiKey.trim() || undefined,
       });
       setBaseStationSetupInfo(response.message ?? 'Wi-Fi saved. The base station is restarting into normal mode.');
       setBaseStationSetupStatus((previous) => ({
@@ -194,6 +196,7 @@ export default function App() {
         configured: true,
         savedSsid: baseStationWifiSsid.trim(),
         backendUrl: baseStationBackendUrl.trim() || serverUrl,
+        boardApiKeySet: Boolean(baseStationBoardApiKey.trim()),
       }));
     } catch (error) {
       setBaseStationSetupError(error instanceof Error ? error.message : 'Unable to save the base station setup.');
@@ -370,7 +373,7 @@ export default function App() {
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalScrollContent}>
               <Text style={styles.modalBodyText}>
-                The app connects to the backend server only. The backend server is responsible for talking to the base station.
+                The app connects to the backend server only. The base station can either be reached locally by the backend or send remote status and telemetry back through the configured backend.
               </Text>
               <Text style={styles.modalStatus}>Current: {connection.label}</Text>
               <Text style={styles.modalDetail}>{connection.detail}</Text>
@@ -451,11 +454,26 @@ export default function App() {
                   placeholderTextColor="#8aa0b7"
                 />
 
+                <Text style={styles.inputLabel}>Board API key for remote bridge (optional)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={baseStationBoardApiKey}
+                  onChangeText={setBaseStationBoardApiKey}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                  placeholder="Needed only if backend auth is enabled"
+                  placeholderTextColor="#8aa0b7"
+                />
+
                 {baseStationSetupStatus ? (
                   <View style={styles.setupStatusCard}>
-                    <Text style={styles.setupStatusTitle}>Setup AP detected</Text>
-                    <Text style={styles.setupStatusText}>Mode: {baseStationSetupStatus.mode ?? 'unknown'} | Saved Wi-Fi: {baseStationSetupStatus.savedSsid || 'none yet'}</Text>
+                    <Text style={styles.setupStatusTitle}>{baseStationSetupStage}</Text>
+                    <Text style={styles.setupStatusText}>Mode: {baseStationSetupStatus.mode ?? 'unknown'} | Wi-Fi state: {baseStationSetupStatus.wifiLinkState ?? 'unknown'}</Text>
+                    <Text style={styles.setupStatusText}>Saved Wi-Fi: {baseStationSetupStatus.savedSsid || 'none yet'}</Text>
                     <Text style={styles.setupStatusText}>Backend: {baseStationSetupStatus.backendUrl || 'default'}</Text>
+                    <Text style={styles.setupStatusText}>Board key: {baseStationSetupStatus.boardApiKeySet ? 'saved' : 'not set'}</Text>
+                    <Text style={styles.setupStatusText}>{baseStationSetupDetail}</Text>
                   </View>
                 ) : null}
 
