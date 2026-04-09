@@ -424,8 +424,10 @@ export default function ControllerScreen({
           message.event === "command.received" ||
           message.event === "path.updated" ||
           message.event === "area.updated" ||
-          message.event === "operator.updated"
+          message.event === "operator.updated" ||
+          message.event === "ws.test"
         ) {
+          setSocketState("live");
           refresh();
         }
       } catch {
@@ -1734,6 +1736,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 });
+
 
 
 
