@@ -288,6 +288,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     try {
       await postJson(serverUrl, '/api/input-area', {
         baseStation: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
+        homePoint: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
         boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
         cellSizeM: 2,
       });
@@ -314,6 +315,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         start: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
         goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
         coverageWidthM: 0.5,
+        returnToBase: true,
         saltPct,
         brinePct,
       });
