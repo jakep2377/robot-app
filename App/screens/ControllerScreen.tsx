@@ -143,6 +143,10 @@ type SupervisionSummary = {
       lastCmdStatus?: string | null;
       connectionPath?: string | null;
       connectionPathLabel?: string | null;
+      stationState?: string | null;
+      mode?: string | null;
+      wifiLinkState?: string | null;
+      loraLinkState?: string | null;
     } | null;
     robot?: {
       state?: string;
@@ -638,7 +642,8 @@ export default function ControllerScreen({
   }, [testMenu]);
 
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
-  const missionState = summary?.mission?.state ?? status?.state ?? "UNKNOWN";
+  const missionState = summary?.mission?.state ?? "UNKNOWN";
+  const robotOperationalState = summary?.robot?.state ?? status?.state ?? "UNKNOWN";
   const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
   const hasCriticalAlert = (summary?.alerts ?? []).some((alert) => alert.level === "critical");
   const latestAlert = summary?.alerts?.[summary.alerts.length - 1] ?? null;
@@ -659,6 +664,11 @@ export default function ControllerScreen({
   const baseStationLabel = baseStationReachable
     ? (connection?.baseStation?.connectionPathLabel === 'Remote bridge' ? 'ONLINE (REMOTE)' : 'ONLINE')
     : baseStationState.toUpperCase();
+  const baseStationOperationalState = connection?.baseStation?.stationState ?? connection?.baseStation?.mode ?? (baseStationReachable ? 'READY' : baseStationState.toUpperCase());
+  const baseStationTransportLabel = [connection?.baseStation?.wifiLinkState, connection?.baseStation?.loraLinkState]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toUpperCase())
+    .join(' • ');
   const gpsReady = Boolean(connection?.robot?.gpsReady);
   const waypointsCommitted = summary?.lora?.wpPushState === "committed";
   const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
@@ -670,8 +680,8 @@ export default function ControllerScreen({
   const readinessItems = [
     { label: "Backend", value: backendState.toUpperCase(), good: backendState === "online" },
     { label: "Connection path", value: connectionPathLabel, good: true },
-    { label: "Base station", value: baseStationLabel, good: baseStationReachable },
-    { label: "Robot link", value: robotLinkState.toUpperCase(), good: robotLinkState === "online" },
+    { label: "Base station", value: baseStationOperationalState, good: baseStationReachable },
+    { label: "Robot state", value: robotOperationalState, good: robotLinkState === "online" },
     { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
     { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
   ];
@@ -740,7 +750,7 @@ export default function ControllerScreen({
     if (spot?.robot?.gpsFix === false) {
       parts.push("No GPS fix");
     }
-    return parts.join(" � ");
+    return parts.join(" � ");
   };
 
 
@@ -756,7 +766,7 @@ export default function ControllerScreen({
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
         </View>
         <View style={[styles.statusPill, styles.statusPillMission]}>
-          <Text style={styles.statusPillText}>{missionState}</Text>
+          <Text style={styles.statusPillText}>{robotOperationalState}</Text>
         </View>
         <View style={[styles.statusPill, connectionPillStyle]}>
           <Text style={styles.statusPillText}>{overallConnectionState.toUpperCase()}</Text>
@@ -782,14 +792,17 @@ export default function ControllerScreen({
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Quick Status</Text>
         <View style={styles.quickGrid}>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot State</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotOperationalState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationLabel}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot Link</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotLinkState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationOperationalState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
         </View>
         <Text style={[styles.metaText, { color: theme.muted }]}>
           Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"} | Status {status?.last_cmd_status ?? connection?.commandPath?.lastCommandStatus ?? "unknown"} | Queue {connection?.baseStation?.queueDepth ?? status?.queue_depth ?? 0}
+        </Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>
+          Base link {baseStationLabel}{baseStationTransportLabel ? ` • ${baseStationTransportLabel}` : ''}
         </Text>
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>

@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Button, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { getJson, postJson, toWebSocketUrl } from '../../lib/serverApi';
+import { getJson, postJson } from '../../lib/serverApi';
 import AppButton from '../common/AppButton';
 
 type RectangleSelection = {
@@ -51,38 +51,6 @@ type CoverageResponse = {
   };
 };
 
-type LiveRobotState = {
-  lat?: number;
-  lon?: number;
-  heading?: number | null;
-  speed?: number | null;
-  gpsFix?: boolean;
-  timestampMs?: number | null;
-  state?: string | null;
-};
-
-type LiveBaseStationState = {
-  lat?: number;
-  lon?: number;
-  state?: string | null;
-  wifiLinkState?: string | null;
-  loraLinkState?: string | null;
-  queueDepth?: number | null;
-  connectionPathLabel?: string | null;
-  timestampMs?: number | null;
-  receivedAt?: number | null;
-};
-
-type StateResponse = {
-  ok?: boolean;
-  state?: {
-    robot?: LiveRobotState | null;
-    baseStation?: LiveBaseStationState | null;
-    remoteBaseStation?: LiveBaseStationState | null;
-    trail?: Array<{ lat: number; lon: number; t?: number }>;
-  };
-};
-
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -102,11 +70,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [message, setMessage] = useState('Tap Draw Area, then pick two corners.');
   const [busy, setBusy] = useState<string | null>(null);
   const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
-  const [liveRobot, setLiveRobot] = useState<LiveRobotState | null>(null);
-  const [liveBaseStation, setLiveBaseStation] = useState<LiveBaseStationState | null>(null);
-  const [liveTrail, setLiveTrail] = useState<LatLng[]>([]);
-  const [socketState, setSocketState] = useState<'connecting' | 'live' | 'polling'>('polling');
-  const coverageRefreshAtRef = useRef(0);
 
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
@@ -319,97 +282,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     }
   };
 
-  const toMapCoordinate = (point?: { lat?: number; lon?: number } | null): LatLng | null => {
-    if (typeof point?.lat !== 'number' || typeof point?.lon !== 'number') {
-      return null;
-    }
-    return { latitude: point.lat, longitude: point.lon };
-  };
-
-  const applyLiveState = (nextState?: StateResponse['state'] | null) => {
-    if (!nextState) return;
-    setLiveRobot(nextState.robot ?? null);
-    setLiveBaseStation(nextState.baseStation ?? nextState.remoteBaseStation ?? null);
-    setLiveTrail(
-      (nextState.trail ?? [])
-        .filter((point) => typeof point?.lat === 'number' && typeof point?.lon === 'number')
-        .map((point) => ({ latitude: point.lat, longitude: point.lon })),
-    );
-  };
-
-  const refreshCoverageIfNeeded = (force = false) => {
-    if (!areaSubmitted) return;
-    const now = Date.now();
-    if (!force && now - coverageRefreshAtRef.current < 2500) return;
-    coverageRefreshAtRef.current = now;
-    void loadCoverageGrid();
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    let pollHandle: ReturnType<typeof setInterval> | null = null;
-    let ws: WebSocket | null = null;
-
-    const refreshLiveState = async () => {
-      try {
-        const response = await getJson<StateResponse>(serverUrl, '/api/state');
-        if (cancelled) return;
-        applyLiveState(response.state ?? null);
-      } catch {
-        if (!cancelled) {
-          setSocketState((current) => (current === 'live' ? current : 'polling'));
-        }
-      }
-    };
-
-    void refreshLiveState();
-    pollHandle = setInterval(() => {
-      void refreshLiveState();
-    }, 2500);
-
-    try {
-      setSocketState('connecting');
-      ws = new WebSocket(toWebSocketUrl(serverUrl));
-      ws.onopen = () => {
-        if (!cancelled) setSocketState('live');
-      };
-      ws.onmessage = (event) => {
-        if (cancelled || typeof event.data !== 'string') return;
-        try {
-          const packet = JSON.parse(event.data) as { event?: string; payload?: unknown };
-          if (packet.event === 'state.snapshot') {
-            applyLiveState(packet.payload as StateResponse['state']);
-            refreshCoverageIfNeeded();
-            return;
-          }
-          if (packet.event === 'telemetry.updated') {
-            const payload = packet.payload as { robot?: LiveRobotState | null } | null;
-            if (payload?.robot) {
-              setLiveRobot(payload.robot);
-              refreshCoverageIfNeeded();
-            }
-          }
-        } catch {
-          // ignore invalid websocket payloads
-        }
-      };
-      ws.onerror = () => {
-        if (!cancelled) setSocketState('polling');
-      };
-      ws.onclose = () => {
-        if (!cancelled) setSocketState('polling');
-      };
-    } catch {
-      setSocketState('polling');
-    }
-
-    return () => {
-      cancelled = true;
-      if (pollHandle) clearInterval(pollHandle);
-      ws?.close();
-    };
-  }, [areaSubmitted, serverUrl]);
-
   const submitArea = async () => {
     if (!selection) return;
     setBusy('area');
@@ -482,11 +354,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const { widthM, heightM, areaM2 } = getSelectionMetrics();
   const arrowSize = areaM2 > 4000 ? 22 : areaM2 > 1600 ? 18 : 14;
   const pathArrowPoints = buildPathArrowPoints(plannedPath);
-  const liveRobotCoordinate = toMapCoordinate(liveRobot);
-  const liveBaseStationCoordinate = toMapCoordinate(liveBaseStation) ?? selection?.baseStation ?? null;
-  const lastRobotUpdateLabel = liveRobot?.timestampMs
-    ? new Date(liveRobot.timestampMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
-    : 'Waiting for telemetry';
 
   return (
     <View style={styles.container}>
@@ -581,41 +448,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               ) : null}
             </>
           ) : null}
-          {liveTrail.length > 1 ? (
-            <Polyline
-              coordinates={liveTrail}
-              strokeColor="rgba(45,138,101,0.60)"
-              strokeWidth={3}
-              geodesic
-            />
-          ) : null}
-          {liveBaseStationCoordinate ? (
-            <Marker
-              coordinate={liveBaseStationCoordinate}
-              pinColor="#2d8a65"
-              title="Base Station"
-              description={liveBaseStation?.connectionPathLabel ?? liveBaseStation?.state ?? 'Field link'}
-            />
-          ) : null}
-          {liveRobotCoordinate ? (
-            <Marker
-              coordinate={liveRobotCoordinate}
-              anchor={{ x: 0.5, y: 0.5 }}
-              flat
-              tracksViewChanges={false}
-              title="Robot"
-              description={liveRobot?.state ?? 'Telemetry live'}
-            >
-              <View
-                style={[
-                  styles.robotMarker,
-                  { transform: [{ rotate: `${liveRobot?.heading ?? 0}deg` }] },
-                ]}
-              >
-                <MaterialCommunityIcons name="robot" size={18} color="#1f5f9f" />
-              </View>
-            </Marker>
-          ) : null}
         </MapView>
       </View>
 
@@ -655,20 +487,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
       <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
         <Text style={[styles.overlayText, { color: theme.text }]}>{message}</Text>
-        <View style={styles.liveStatusRow}>
-          <View style={[styles.liveChip, socketState === 'live' ? styles.liveChipOk : styles.liveChipPoll]}>
-            <Text style={styles.liveChipText}>{socketState === 'live' ? 'Live updates' : 'Polling backend'}</Text>
-          </View>
-          <Text style={styles.liveMetaText}>
-            Robot {liveRobot?.state ?? 'idle'} • {liveRobot?.gpsFix ? 'GPS fix' : 'GPS pending'} • {lastRobotUpdateLabel}
-          </Text>
-          <Text style={styles.liveMetaText}>
-            Base station {liveBaseStation?.state ?? liveBaseStation?.wifiLinkState ?? 'waiting'} • Queue {liveBaseStation?.queueDepth ?? 0}
-          </Text>
-          <Text style={styles.liveMetaText}>
-            Backend {serverUrl.replace(/^https?:\/\//i, '')}
-          </Text>
-        </View>
         <Text style={styles.stepText}>Draw area • Submit area • Plan path</Text>
         {plannedPath.length > 1 ? (
           <Text style={styles.pathMetaText}>Path: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
@@ -838,42 +656,6 @@ const styles = StyleSheet.create({
   pathArrow: {
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  robotMarker: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: 'rgba(255,255,255,0.96)',
-    borderWidth: 2,
-    borderColor: '#1f5f9f',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  liveStatusRow: {
-    gap: 4,
-    marginBottom: 6,
-  },
-  liveChip: {
-    alignSelf: 'flex-start',
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  liveChipOk: {
-    backgroundColor: '#1f7a52',
-  },
-  liveChipPoll: {
-    backgroundColor: '#9b6a16',
-  },
-  liveChipText: {
-    color: '#ffffff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  liveMetaText: {
-    color: '#35506a',
-    fontSize: 11,
-    fontWeight: '600',
   },
   pathArrowText: {
     color: '#1f5f9f',
