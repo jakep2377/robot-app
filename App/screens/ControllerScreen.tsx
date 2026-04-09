@@ -252,6 +252,84 @@ const MISSION_ENDPOINTS: Record<string, string> = {
   "push-waypoints": "/api/lora/push-waypoints",
 };
 
+function formatReadableValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return formatReadableValue(JSON.parse(trimmed));
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const items = value.map(formatReadableValue).filter((item): item is string => Boolean(item));
+    return items.length ? items.join(", ") : null;
+  }
+  if (typeof value === "object") {
+    const parts = Object.entries(value as Record<string, unknown>)
+      .map(([key, inner]) => {
+        const formatted = formatReadableValue(inner);
+        return formatted ? `${key}: ${formatted}` : null;
+      })
+      .filter((item): item is string => Boolean(item));
+    return parts.length ? parts.join(" | ") : null;
+  }
+  return null;
+}
+
+function summarizeCommandResult(title: string, response: TestMenuRunResponse): string {
+  if (!response || typeof response !== "object") {
+    return `${title}: Completed`;
+  }
+
+  const result = response.result;
+  if (!result || typeof result !== "object") {
+    return `${title}: ${response.ok ? "Completed" : "Failed"}`;
+  }
+
+  const error = typeof result.error === "string" ? result.error : null;
+  if (error) {
+    return `${title}: ${error}`;
+  }
+
+  const typedResult = result as Record<string, unknown>;
+  const steps = Array.isArray(typedResult.steps) ? typedResult.steps : null;
+  if (steps) {
+    const failed = steps.find((step) => step && typeof step === "object" && (step as Record<string, unknown>).ok === false) as Record<string, unknown> | undefined;
+    if (failed) {
+      const failedCommand = typeof failed.command === "string" ? failed.command : "A step";
+      const failedError = typeof failed.error === "string" ? failed.error : null;
+      return `${title}: ${failedCommand} failed${failedError ? ` (${failedError})` : ""}`;
+    }
+    return `${title}: ${steps.length} step${steps.length === 1 ? "" : "s"} completed`;
+  }
+
+  if (typeof typedResult.sent === "number") {
+    return `${title}: ${typedResult.sent} waypoint${typedResult.sent === 1 ? "" : "s"} committed`;
+  }
+
+  const mission = typedResult.mission;
+  if (mission && typeof mission === "object" && typeof (mission as { state?: unknown }).state === "string") {
+    return `${title}: Mission ${String((mission as { state?: unknown }).state).toLowerCase()}`;
+  }
+
+  if (typeof typedResult.command === "string") {
+    const body = formatReadableValue(typedResult.body);
+    return `${title}: ${typedResult.command}${body ? ` | ${body}` : ""}`;
+  }
+
+  const formatted = formatReadableValue(result);
+  return `${title}: ${formatted || (response.ok ? "Completed" : "Failed")}`;
+}
+
 export default function ControllerScreen({
   serverUrl,
   saltPct,
@@ -518,8 +596,7 @@ export default function ControllerScreen({
         payload[field] = rawValue;
       }
       const response = await postJson<TestMenuRunResponse>(serverUrl, "/api/test-menu/run", payload);
-      const resultSummary = response?.result ? JSON.stringify(response.result) : "Completed";
-      setTestResult(`${action.title}: ${resultSummary}`);
+      setTestResult(summarizeCommandResult(action.title, response));
       setError(null);
       await refresh();
     } catch (requestError) {
