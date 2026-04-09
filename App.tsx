@@ -248,6 +248,20 @@ export default function App() {
     setConnectionModalVisible(false);
   };
 
+  const baseStationSetupStage = baseStationSetupError
+    ? 'Setup AP not reached'
+    : baseStationSetupInfo
+      ? 'Setup saved'
+      : baseStationSetupStatus
+        ? 'Setup AP connected'
+        : 'Waiting for setup';
+  const baseStationSetupDetail = baseStationSetupError
+    ? 'Join SaltRobot_Base, then tap Check Setup AP.'
+    : baseStationSetupInfo
+      ? 'Reconnect your phone to the normal network, then tap Find Field Backend.'
+      : baseStationSetupStatus
+        ? 'The base station AP is responding. Save Wi-Fi to move it onto your normal network.'
+        : 'Use this section only while your phone is connected to SaltRobot_Base.';
   const tabScreenOptions = useMemo(() => ({
     headerShown: false,
     tabBarActiveTintColor: '#1f5f9f',
@@ -354,36 +368,110 @@ export default function App() {
               </Pressable>
             </View>
 
-            <Text style={styles.modalBodyText}>
-              The app connects to the backend server only. The backend server is responsible for talking to the base station.
-            </Text>
-            <Text style={styles.modalStatus}>Current: {connection.label}</Text>
-            <Text style={styles.modalDetail}>{connection.detail}</Text>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalScrollContent}>
+              <Text style={styles.modalBodyText}>
+                The app connects to the backend server only. The backend server is responsible for talking to the base station.
+              </Text>
+              <Text style={styles.modalStatus}>Current: {connection.label}</Text>
+              <Text style={styles.modalDetail}>{connection.detail}</Text>
 
-            <Text style={styles.inputLabel}>Manual backend URL</Text>
-            <TextInput
-              style={styles.input}
-              value={manualServerUrl}
-              onChangeText={setManualServerUrl}
-              autoCapitalize="none"
-              autoCorrect={false}
-              placeholder="http://192.168.1.50:8080"
-              placeholderTextColor="#8aa0b7"
-            />
+              <Text style={styles.inputLabel}>Manual backend URL</Text>
+              <TextInput
+                style={styles.input}
+                value={manualServerUrl}
+                onChangeText={setManualServerUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="http://192.168.1.50:8080"
+                placeholderTextColor="#8aa0b7"
+              />
 
-            {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
+              {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
 
-            <View style={styles.buttonStack}>
-              <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => runDiscovery(serverUrl)} disabled={connectionBusy}>
-                <Text style={styles.actionPrimaryText}>Find Field Backend</Text>
-              </Pressable>
-              <Pressable style={styles.actionButton} onPress={saveManualServer} disabled={connectionBusy}>
-                <Text style={styles.actionSecondaryText}>Use Manual Address</Text>
-              </Pressable>
-              <Pressable style={styles.actionButton} onPress={useCloudFallback} disabled={connectionBusy}>
-                <Text style={styles.actionSecondaryText}>Use Remote Fallback</Text>
-              </Pressable>
-            </View>
+              <View style={styles.buttonStack}>
+                <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => runDiscovery(serverUrl)} disabled={connectionBusy}>
+                  <Text style={styles.actionPrimaryText}>Find Field Backend</Text>
+                </Pressable>
+                <Pressable style={styles.actionButton} onPress={saveManualServer} disabled={connectionBusy}>
+                  <Text style={styles.actionSecondaryText}>Use Manual Address</Text>
+                </Pressable>
+                <Pressable style={styles.actionButton} onPress={useCloudFallback} disabled={connectionBusy}>
+                  <Text style={styles.actionSecondaryText}>Use Remote Fallback</Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.setupSection}>
+                <Text style={styles.setupTitle}>Base Station Setup</Text>
+                <Text style={styles.modalBodyText}>
+                  Connect your phone to <Text style={styles.inlineStrong}>SaltRobot_Base</Text>, then use this section to save the Wi-Fi and backend that the base station should use automatically.
+                </Text>
+
+                <Text style={styles.inputLabel}>Setup AP address</Text>
+                <TextInput
+                  style={styles.input}
+                  value={baseStationUrl}
+                  onChangeText={(value) => setBaseStationUrl(normalizeBaseStationUrl(value))}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="http://192.168.4.1"
+                  placeholderTextColor="#8aa0b7"
+                />
+
+                <Text style={styles.inputLabel}>Wi-Fi name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={baseStationWifiSsid}
+                  onChangeText={setBaseStationWifiSsid}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="Customer or hotspot Wi-Fi"
+                  placeholderTextColor="#8aa0b7"
+                />
+
+                <Text style={styles.inputLabel}>Wi-Fi password</Text>
+                <TextInput
+                  style={styles.input}
+                  value={baseStationWifiPassword}
+                  onChangeText={setBaseStationWifiPassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                  placeholder="Enter Wi-Fi password"
+                  placeholderTextColor="#8aa0b7"
+                />
+
+                <Text style={styles.inputLabel}>Backend URL for the base station</Text>
+                <TextInput
+                  style={styles.input}
+                  value={baseStationBackendUrl}
+                  onChangeText={setBaseStationBackendUrl}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="https://robot-lora-server.onrender.com"
+                  placeholderTextColor="#8aa0b7"
+                />
+
+                {baseStationSetupStatus ? (
+                  <View style={styles.setupStatusCard}>
+                    <Text style={styles.setupStatusTitle}>Setup AP detected</Text>
+                    <Text style={styles.setupStatusText}>Mode: {baseStationSetupStatus.mode ?? 'unknown'} | Saved Wi-Fi: {baseStationSetupStatus.savedSsid || 'none yet'}</Text>
+                    <Text style={styles.setupStatusText}>Backend: {baseStationSetupStatus.backendUrl || 'default'}</Text>
+                  </View>
+                ) : null}
+
+                {baseStationSetupInfo ? <Text style={styles.infoText}>{baseStationSetupInfo}</Text> : null}
+                {baseStationSetupError ? <Text style={styles.errorText}>{baseStationSetupError}</Text> : null}
+
+                <View style={styles.buttonStack}>
+                  <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={inspectBaseStationSetup} disabled={baseStationSetupBusy}>
+                    <Text style={styles.actionPrimaryText}>Check Setup AP</Text>
+                  </Pressable>
+                  <Pressable style={styles.actionButton} onPress={saveBaseStationSetup} disabled={baseStationSetupBusy}>
+                    <Text style={styles.actionSecondaryText}>Save Wi-Fi to Base Station</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -543,6 +631,10 @@ const styles = StyleSheet.create({
     color: '#2d8a65',
   },
 });
+
+
+
+
 
 
 
