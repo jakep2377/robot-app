@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
+  NativeModules,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -23,30 +24,29 @@ import { configureBaseStationSetup, normalizeBaseStationUrl, normalizeServerUrl,
 
 const Tab = createBottomTabNavigator();
 const DEFAULT_CLOUD_SERVER_URL = 'https://robot-lora-server.onrender.com';
+const ENV_LOCAL_SERVER_CANDIDATES = typeof process.env.EXPO_PUBLIC_LOCAL_SERVER_URLS === 'string'
+  ? process.env.EXPO_PUBLIC_LOCAL_SERVER_URLS.split(',').map((value) => value.trim()).filter(Boolean)
+  : [];
+const SCRIPT_LOCAL_SERVER_CANDIDATES = (() => {
+  const scriptUrl = NativeModules?.SourceCode?.scriptURL;
+  const hostMatch = typeof scriptUrl === 'string'
+    ? scriptUrl.match(/^[a-z]+:\/\/([^/:]+)/i)
+    : null;
+  const host = hostMatch?.[1]?.trim();
+
+  if (!host || ['localhost', '127.0.0.1', '10.0.2.2', '10.0.3.2'].includes(host)) {
+    return [];
+  }
+
+  return [`http://${host}:8080`];
+})();
 const LOCAL_SERVER_CANDIDATES = [
+  ...ENV_LOCAL_SERVER_CANDIDATES,
+  ...SCRIPT_LOCAL_SERVER_CANDIDATES,
   'http://10.0.2.2:8080',
   'http://10.0.3.2:8080',
   'http://localhost:8080',
   'http://127.0.0.1:8080',
-  'http://field-backend.local:8080',
-  'http://robot-lora-server.local:8080',
-];
-
-function buildSubnetCandidates(prefix: string, start: number, end: number) {
-  const urls: string[] = [];
-  for (let host = start; host <= end; host += 1) {
-    urls.push(`http://${prefix}.${host}:8080`);
-  }
-  return urls;
-}
-
-const HOTSPOT_SERVER_CANDIDATES = [
-  ...buildSubnetCandidates('172.20.10', 2, 15),
-  ...buildSubnetCandidates('192.168.43', 2, 15),
-  ...buildSubnetCandidates('192.168.137', 2, 15),
-  ...buildSubnetCandidates('192.168.1', 2, 12),
-  ...buildSubnetCandidates('192.168.0', 2, 12),
-  ...buildSubnetCandidates('10.0.0', 2, 12),
 ];
 
 type ConnectionMode = 'discovering' | 'local' | 'cloud' | 'manual';
@@ -58,36 +58,6 @@ type ConnectionState = {
   status: 'connecting' | 'connected' | 'fallback' | 'error';
   detail: string;
 };
-
-type BackendBaseStationStatus = {
-  reachable: boolean;
-  state: string;
-  path: string;
-  reason: string | null;
-  commandPath: string;
-  telemetryState: string;
-};
-
-function readBackendBaseStationStatus(payload: unknown): BackendBaseStationStatus | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const root = payload as Record<string, unknown>;
-  const connectivity = (root.connectivity && typeof root.connectivity === 'object' ? root.connectivity : null) as Record<string, unknown> | null;
-  if (!connectivity) return null;
-  const baseStation = (connectivity.baseStation && typeof connectivity.baseStation === 'object' ? connectivity.baseStation : null) as Record<string, unknown> | null;
-  const overall = (connectivity.overall && typeof connectivity.overall === 'object' ? connectivity.overall : null) as Record<string, unknown> | null;
-  const commandPath = (connectivity.commandPath && typeof connectivity.commandPath === 'object' ? connectivity.commandPath : null) as Record<string, unknown> | null;
-  const robot = (connectivity.robot && typeof connectivity.robot === 'object' ? connectivity.robot : null) as Record<string, unknown> | null;
-  if (!baseStation) return null;
-
-  return {
-    reachable: Boolean(baseStation.reachable ?? (baseStation.state === 'online')),
-    state: String(baseStation.state ?? 'unknown').toUpperCase(),
-    path: String(baseStation.connectionPathLabel ?? overall?.connectionPathLabel ?? 'Unknown'),
-    reason: typeof overall?.reason === 'string' ? overall.reason : null,
-    commandPath: String(commandPath?.state ?? 'unknown').toUpperCase(),
-    telemetryState: String(robot?.state ?? 'unknown').toUpperCase(),
-  };
-}
 
 function uniqueUrls(urls: string[]) {
   return Array.from(new Set(urls.map((value) => normalizeServerUrl(value))));
@@ -106,7 +76,6 @@ async function discoverBestServer(preferredUrl?: string | null) {
       ? [process.env.EXPO_PUBLIC_DEFAULT_SERVER_URL.trim()]
       : []),
     ...LOCAL_SERVER_CANDIDATES,
-    ...HOTSPOT_SERVER_CANDIDATES,
   ]).filter((url) => !url.includes('onrender.com'));
 
   const local = await pickFirstHealthy(localCandidates, 1400);
@@ -143,7 +112,7 @@ async function discoverBestServer(preferredUrl?: string | null) {
         mode: 'discovering' as const,
         label: 'Backend unavailable',
         status: 'error' as const,
-        detail: 'Could not reach a field backend server or the remote fallback.',
+        detail: 'Could not reach a local backend or the cloud fallback.',
       },
     probes: [...local.results, cloud],
   };
@@ -156,7 +125,7 @@ export default function App() {
     mode: 'discovering',
     label: 'Finding field backend',
     status: 'connecting',
-    detail: 'Looking for a nearby field backend server first.',
+    detail: 'Looking for a nearby field backend first.',
   });
   const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
@@ -171,10 +140,6 @@ export default function App() {
   const [baseStationSetupError, setBaseStationSetupError] = useState<string | null>(null);
   const [baseStationSetupInfo, setBaseStationSetupInfo] = useState<string | null>(null);
   const [baseStationSetupStatus, setBaseStationSetupStatus] = useState<BaseStationSetupStatus | null>(null);
-  const [backendBaseStationStatus, setBackendBaseStationStatus] = useState<BackendBaseStationStatus | null>(null);
-  const [backendBaseStationBusy, setBackendBaseStationBusy] = useState(false);
-  const [backendBaseStationError, setBackendBaseStationError] = useState<string | null>(null);
-  const [backendBaseStationInfo, setBackendBaseStationInfo] = useState<string | null>(null);
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
 
@@ -192,9 +157,6 @@ export default function App() {
           setConnectionError(failedLocal.map((probe) => `${probe.serverUrl}: ${probe.error ?? 'unreachable'}`).join('\n'));
         }
       }
-      if (result.state.status !== 'error') {
-        void inspectBaseStationViaBackend(result.state.serverUrl);
-      }
     } finally {
       setConnectionBusy(false);
     }
@@ -210,15 +172,6 @@ export default function App() {
   useEffect(() => {
     setBaseStationBackendUrl(serverUrl);
   }, [serverUrl]);
-
-  useEffect(() => {
-    if (!connectionModalVisible) return;
-    void inspectBaseStationViaBackend(serverUrl);
-    const timer = setInterval(() => {
-      void inspectBaseStationViaBackend(serverUrl);
-    }, 6000);
-    return () => clearInterval(timer);
-  }, [connectionModalVisible, serverUrl]);
 
   const inspectBaseStationSetup = async () => {
     setBaseStationSetupBusy(true);
@@ -250,53 +203,26 @@ export default function App() {
     setBaseStationSetupError(null);
     setBaseStationSetupInfo(null);
     try {
+      const normalizedBackendUrl = normalizeServerUrl(baseStationBackendUrl.trim() || serverUrl);
       const response = await configureBaseStationSetup(baseStationUrl, {
         ssid: baseStationWifiSsid.trim(),
         password: baseStationWifiPassword,
-        backendUrl: baseStationBackendUrl.trim() || serverUrl,
+        backendUrl: normalizedBackendUrl,
         boardApiKey: baseStationBoardApiKey.trim() || undefined,
       });
-      setBaseStationSetupInfo(response.message ?? 'Wi-Fi saved. The base station is restarting into normal mode.');
+      setBaseStationBackendUrl(normalizedBackendUrl);
+      setBaseStationSetupInfo(response.message ?? 'Wi‑Fi saved. The base station is restarting into normal mode.');
       setBaseStationSetupStatus((previous) => ({
         ...(previous ?? {}),
         configured: true,
         savedSsid: baseStationWifiSsid.trim(),
-        backendUrl: baseStationBackendUrl.trim() || serverUrl,
+        backendUrl: normalizedBackendUrl,
         boardApiKeySet: Boolean(baseStationBoardApiKey.trim()),
       }));
     } catch (error) {
       setBaseStationSetupError(error instanceof Error ? error.message : 'Unable to save the base station setup.');
     } finally {
       setBaseStationSetupBusy(false);
-    }
-  };
-
-
-  const inspectBaseStationViaBackend = async (targetServerUrl?: string) => {
-    const candidate = targetServerUrl ?? serverUrl;
-    setBackendBaseStationBusy(true);
-    setBackendBaseStationError(null);
-    setBackendBaseStationInfo(null);
-    try {
-      const result = await probeServer(candidate, 2500);
-      if (!result.ok) {
-        setBackendBaseStationStatus(null);
-        setBackendBaseStationError(result.error ?? 'Unable to reach the backend.');
-        return;
-      }
-      const parsed = readBackendBaseStationStatus(result.payload);
-      setBackendBaseStationStatus(parsed);
-      if (!parsed) {
-        setBackendBaseStationError('Backend did not return base station connectivity details.');
-        return;
-      }
-      const headline = parsed.reachable
-        ? `Backend sees the base station over ${parsed.path}.`
-        : 'Backend is not currently seeing the base station.';
-      const suffix = parsed.reason ? ` ${parsed.reason}` : '';
-      setBackendBaseStationInfo(`${headline} Command path: ${parsed.commandPath}. Robot link: ${parsed.telemetryState}.${suffix}`);
-    } finally {
-      setBackendBaseStationBusy(false);
     }
   };
 
@@ -320,7 +246,6 @@ export default function App() {
       status: 'connected',
       detail: `Connected to ${candidate}`,
     });
-    void inspectBaseStationViaBackend(candidate);
     setConnectionModalVisible(false);
   };
 
@@ -344,7 +269,6 @@ export default function App() {
       status: 'fallback',
       detail: `Using remote backend in ${result.latencyMs} ms`,
     });
-    void inspectBaseStationViaBackend(result.serverUrl);
     setConnectionModalVisible(false);
   };
 
@@ -358,7 +282,7 @@ export default function App() {
   const baseStationSetupDetail = baseStationSetupError
     ? 'Join SaltRobot_Base, then tap Check Setup AP.'
     : baseStationSetupInfo
-      ? 'Reconnect your phone to the normal network, then use Find Field Backend for a local server or Remote fallback for the cloud backend.'
+      ? 'Reconnect your phone to the normal network, then tap Find Field Backend.'
       : baseStationSetupStatus
         ? 'The base station AP is responding. Save Wi-Fi to move it onto your normal network.'
         : 'Use this section only while your phone is connected to SaltRobot_Base.';
@@ -470,7 +394,7 @@ export default function App() {
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalScrollContent}>
               <Text style={styles.modalBodyText}>
-                The app connects to the backend server only. Find Field Backend looks for that server, not the base station. The base station can either be reached locally by the backend or send remote status and telemetry back through the configured backend.
+                The app connects to the backend server only. The base station can either be reached locally by the backend or send remote status and telemetry back through the configured backend.
               </Text>
               <Text style={styles.modalStatus}>Current: {connection.label}</Text>
               <Text style={styles.modalDetail}>{connection.detail}</Text>
@@ -498,33 +422,6 @@ export default function App() {
                 <Pressable style={styles.actionButton} onPress={useCloudFallback} disabled={connectionBusy}>
                   <Text style={styles.actionSecondaryText}>Use Remote Fallback</Text>
                 </Pressable>
-              </View>
-
-              <View style={styles.setupSection}>
-                <Text style={styles.setupTitle}>Backend View Of Base Station</Text>
-                <Text style={styles.modalBodyText}>
-                  This checks whether the selected backend currently sees the base station. It is the best normal-use test after setup.
-                </Text>
-
-                {backendBaseStationStatus ? (
-                  <View style={styles.setupStatusCard}>
-                    <Text style={styles.setupStatusTitle}>{backendBaseStationStatus.reachable ? 'Backend sees base station' : 'Backend does not see base station'}</Text>
-                    <Text style={styles.setupStatusText}>State: {backendBaseStationStatus.state}</Text>
-                    <Text style={styles.setupStatusText}>Path: {backendBaseStationStatus.path}</Text>
-                    <Text style={styles.setupStatusText}>Command path: {backendBaseStationStatus.commandPath}</Text>
-                    <Text style={styles.setupStatusText}>Robot link: {backendBaseStationStatus.telemetryState}</Text>
-                    {backendBaseStationStatus.reason ? <Text style={styles.setupStatusText}>Reason: {backendBaseStationStatus.reason}</Text> : null}
-                  </View>
-                ) : null}
-
-                {backendBaseStationInfo ? <Text style={styles.infoText}>{backendBaseStationInfo}</Text> : null}
-                {backendBaseStationError ? <Text style={styles.errorText}>{backendBaseStationError}</Text> : null}
-
-                <View style={styles.buttonStack}>
-                  <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => inspectBaseStationViaBackend(serverUrl)} disabled={backendBaseStationBusy}>
-                    <Text style={styles.actionPrimaryText}>Check Through Backend</Text>
-                  </Pressable>
-                </View>
               </View>
 
               <View style={styles.setupSection}>
