@@ -632,9 +632,13 @@ export default function ControllerScreen({
   const robotLinkState = connection?.robot?.state ?? (health?.checks?.telemetry ? "online" : "stale");
   const commandPathState = connection?.commandPath?.state ?? "unknown";
   const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
+  const baseStationReachable = Boolean(connection?.baseStation?.reachable ?? (baseStationState === "online"));
   const connectionPathLabel = connectionMode === 'cloud'
     ? 'Remote fallback'
     : connection?.baseStation?.connectionPathLabel ?? connection?.overall?.connectionPathLabel ?? 'Field network';
+  const baseStationLabel = baseStationReachable
+    ? (connection?.baseStation?.connectionPathLabel === 'Remote bridge' ? 'ONLINE (REMOTE)' : 'ONLINE')
+    : baseStationState.toUpperCase();
   const gpsReady = Boolean(connection?.robot?.gpsReady);
   const waypointsCommitted = summary?.lora?.wpPushState === "committed";
   const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
@@ -646,14 +650,14 @@ export default function ControllerScreen({
   const readinessItems = [
     { label: "Backend", value: backendState.toUpperCase(), good: backendState === "online" },
     { label: "Connection path", value: connectionPathLabel, good: true },
-    { label: "Base station", value: baseStationState.toUpperCase(), good: baseStationState === "online" },
+    { label: "Base station", value: baseStationLabel, good: baseStationReachable },
     { label: "Robot link", value: robotLinkState.toUpperCase(), good: robotLinkState === "online" },
     { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
     { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
   ];
   const preflightItems = [
     { label: "Backend connected", detail: "The app can reach the field backend.", good: backendState === "online" },
-    { label: "Base station reachable", detail: "The backend can reach the base station.", good: baseStationState === "online" },
+    { label: "Base station reachable", detail: connection?.baseStation?.connectionPathLabel === "Remote bridge" ? "The backend is receiving live remote status from the base station." : "The backend can reach the base station.", good: baseStationReachable },
     { label: "Robot link live", detail: "Robot telemetry is current.", good: robotLinkState === "online" },
     { label: "GPS ready", detail: "The robot has a valid GPS fix for autonomy.", good: gpsReady },
     { label: "Waypoints committed", detail: "The planned path has been committed to the robot.", good: waypointsCommitted },
@@ -760,7 +764,7 @@ export default function ControllerScreen({
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationLabel}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot Link</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotLinkState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
         </View>
