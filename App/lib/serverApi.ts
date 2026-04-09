@@ -1,3 +1,27 @@
+function appendLocalBackendDefaultPort(url: string) {
+  const match = url.match(/^(https?):\/\/([^/]+)(\/.*)?$/i);
+  if (!match) {
+    return url;
+  }
+
+  const [, scheme, authority, suffix = ""] = match;
+  if (authority.includes(":") || scheme.toLowerCase() === "https") {
+    return `${scheme}://${authority}${suffix}`;
+  }
+
+  const host = authority.toLowerCase();
+  const isLocalLike = host === "localhost"
+    || host === "127.0.0.1"
+    || host === "10.0.2.2"
+    || host === "10.0.3.2"
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    || host.endsWith(".local");
+
+  return isLocalLike ? `${scheme}://${authority}:8080${suffix}` : `${scheme}://${authority}${suffix}`;
+}
+
 export function normalizeServerUrl(rawUrl: string) {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
@@ -5,7 +29,7 @@ export function normalizeServerUrl(rawUrl: string) {
   }
 
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-  return withProtocol.replace(/\/+$/, "");
+  return appendLocalBackendDefaultPort(withProtocol).replace(/\/+$/, "");
 }
 
 export function normalizeBaseStationUrl(rawUrl: string) {
@@ -66,6 +90,27 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
   }
 }
 
+function parseBodyPayload(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function looksLikeRobotBackend(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+
+  const candidate = payload as Record<string, unknown>;
+  return candidate.service === "robot-lora-server"
+    || candidate.mode === "SERVER"
+    || (typeof candidate.connectivity === "object" && candidate.connectivity !== null)
+    || (candidate.ok === true && typeof candidate.checks === "object");
+}
+
 export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<ServerProbeResult> {
   const normalized = normalizeServerUrl(serverUrl);
   const startedAt = Date.now();
@@ -79,21 +124,14 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
     const healthText = await readBody(healthResponse);
     const latencyMs = Date.now() - startedAt;
 
-    if (healthResponse.ok) {
-      let payload: unknown = null;
-      if (healthText) {
-        try {
-          payload = JSON.parse(healthText);
-        } catch {
-          payload = healthText;
-        }
-      }
+    const healthPayload = parseBodyPayload(healthText);
+    if (healthResponse.ok && looksLikeRobotBackend(healthPayload)) {
       return {
         ok: true,
         serverUrl: normalized,
         status: healthResponse.status,
         latencyMs,
-        payload,
+        payload: healthPayload,
       };
     }
 
@@ -113,13 +151,16 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
       };
     }
 
-    let payload: unknown = null;
-    if (statusText) {
-      try {
-        payload = JSON.parse(statusText);
-      } catch {
-        payload = statusText;
-      }
+    const payload = parseBodyPayload(statusText);
+    if (!looksLikeRobotBackend(payload)) {
+      return {
+        ok: false,
+        serverUrl: normalized,
+        status: statusResponse.status,
+        latencyMs,
+        error: "Endpoint is reachable, but it is not the robot backend.",
+        payload,
+      };
     }
 
     return {
