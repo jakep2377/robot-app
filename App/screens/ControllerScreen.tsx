@@ -361,6 +361,7 @@ export default function ControllerScreen({
   const [preflightVisible, setPreflightVisible] = useState(false);
   const refreshInFlight = useRef(false);
   const heldManualCommand = useRef<string | null>(null);
+  const heldManualTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = async () => {
     if (refreshInFlight.current) {
@@ -454,11 +455,28 @@ export default function ControllerScreen({
     if (heldManualCommand.current === command || pendingAction) {
       return;
     }
+
+    if (heldManualTimer.current) {
+      clearInterval(heldManualTimer.current);
+      heldManualTimer.current = null;
+    }
+
     heldManualCommand.current = command;
     await performCommand(command);
+
+    heldManualTimer.current = setInterval(() => {
+      if (heldManualCommand.current !== command || pendingAction) {
+        return;
+      }
+      void performCommand(command);
+    }, 650);
   };
 
   const releaseHeldManualCommand = async () => {
+    if (heldManualTimer.current) {
+      clearInterval(heldManualTimer.current);
+      heldManualTimer.current = null;
+    }
     if (!heldManualCommand.current || pendingAction) {
       heldManualCommand.current = null;
       return;
@@ -1716,6 +1734,7 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
 });
+
 
 
 
