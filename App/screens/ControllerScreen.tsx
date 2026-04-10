@@ -148,6 +148,16 @@ type SupervisionSummary = {
       wifiLinkState?: string | null;
       loraLinkState?: string | null;
     } | null;
+    gateway?: {
+      state?: string;
+      reachable?: boolean;
+      working?: boolean;
+      reason?: string | null;
+      linkState?: string | null;
+      evidence?: string | null;
+      lastAck?: string | null;
+      lastLoRa?: string | null;
+    } | null;
     robot?: {
       state?: string;
       reachable?: boolean;
@@ -202,6 +212,7 @@ type HealthPayload = {
   checks?: {
     db?: boolean;
     bridge?: boolean;
+    gateway?: boolean;
     telemetry?: boolean;
   };
   telemetryStale?: boolean;
@@ -669,6 +680,13 @@ export default function ControllerScreen({
     .filter((value): value is string => Boolean(value))
     .map((value) => value.toUpperCase())
     .join(' • ');
+  const gatewayState = connection?.gateway?.state ?? (connection?.baseStation?.loraLinkState ? String(connection.baseStation.loraLinkState).toLowerCase() : 'unknown');
+  const gatewayWorking = Boolean(connection?.gateway?.working ?? connection?.gateway?.reachable ?? (gatewayState === 'online'));
+  const gatewayReason = connection?.gateway?.reason ?? null;
+  const gatewayLabel = [gatewayState, connection?.gateway?.linkState, connection?.gateway?.evidence]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toUpperCase().replace(/-/g, ' '))
+    .join(' • ');
   const gpsReady = Boolean(connection?.robot?.gpsReady);
   const waypointsCommitted = summary?.lora?.wpPushState === "committed";
   const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
@@ -681,6 +699,7 @@ export default function ControllerScreen({
     { label: "Backend", value: backendState.toUpperCase(), good: backendState === "online" },
     { label: "Connection path", value: connectionPathLabel, good: true },
     { label: "Base station", value: baseStationOperationalState, good: baseStationReachable },
+    { label: "Gateway", value: gatewayLabel || gatewayState.toUpperCase(), good: gatewayWorking },
     { label: "Robot state", value: robotOperationalState, good: robotLinkState === "online" },
     { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
     { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
@@ -688,6 +707,7 @@ export default function ControllerScreen({
   const preflightItems = [
     { label: "Backend connected", detail: "The app can reach the field backend.", good: backendState === "online" },
     { label: "Base station reachable", detail: connection?.baseStation?.connectionPathLabel === "Remote bridge" ? "The backend is receiving live remote status from the base station." : "The backend can reach the base station.", good: baseStationReachable },
+    { label: "Gateway live", detail: gatewayReason ?? "The gateway is passing LoRa traffic between the robot and base station.", good: gatewayWorking },
     { label: "Robot link live", detail: "Robot telemetry is current.", good: robotLinkState === "online" },
     { label: "GPS ready", detail: "The robot has a valid GPS fix for autonomy.", good: gpsReady },
     { label: "Waypoints committed", detail: "The planned path has been committed to the robot.", good: waypointsCommitted },
@@ -796,6 +816,7 @@ export default function ControllerScreen({
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationOperationalState}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Gateway</Text><Text style={[styles.quickValue, { color: theme.text }]}>{gatewayLabel || gatewayState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
         </View>
         <Text style={[styles.metaText, { color: theme.muted }]}>
@@ -803,6 +824,9 @@ export default function ControllerScreen({
         </Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>
           Base link {baseStationLabel}{baseStationTransportLabel ? ` • ${baseStationTransportLabel}` : ''}
+        </Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>
+          Gateway {gatewayLabel || gatewayState.toUpperCase()}{gatewayReason ? ` • ${gatewayReason}` : ''}
         </Text>
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>
