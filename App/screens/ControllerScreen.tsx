@@ -687,6 +687,14 @@ export default function ControllerScreen({
     .filter((value): value is string => Boolean(value))
     .map((value) => value.toUpperCase().replace(/-/g, ' '))
     .join(' • ');
+  const stm32TelemetryAgeMs = summary?.robot?.ageMs ?? null;
+  const stm32Online = Boolean(summary?.robot && !summary?.robot?.stale && robotLinkState === 'online');
+  const stm32StateLabel = stm32Online ? 'ONLINE' : (summary?.robot ? 'STALE' : 'OFFLINE');
+  const stm32LastSeenLabel = typeof stm32TelemetryAgeMs === 'number'
+    ? (stm32TelemetryAgeMs < 1000
+        ? `${stm32TelemetryAgeMs} ms ago`
+        : `${(stm32TelemetryAgeMs / 1000).toFixed(stm32TelemetryAgeMs < 10000 ? 1 : 0)} s ago`)
+    : 'No telemetry yet';
   const gpsReady = Boolean(connection?.robot?.gpsReady);
   const waypointsCommitted = summary?.lora?.wpPushState === "committed";
   const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
@@ -700,6 +708,7 @@ export default function ControllerScreen({
     { label: "Connection path", value: connectionPathLabel, good: true },
     { label: "Base station", value: baseStationOperationalState, good: baseStationReachable },
     { label: "Gateway", value: gatewayLabel || gatewayState.toUpperCase(), good: gatewayWorking },
+    { label: "STM32", value: `${stm32StateLabel} • ${stm32LastSeenLabel}`, good: stm32Online },
     { label: "Robot state", value: robotOperationalState, good: robotLinkState === "online" },
     { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
     { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
@@ -708,6 +717,7 @@ export default function ControllerScreen({
     { label: "Backend connected", detail: "The app can reach the field backend.", good: backendState === "online" },
     { label: "Base station reachable", detail: connection?.baseStation?.connectionPathLabel === "Remote bridge" ? "The backend is receiving live remote status from the base station." : "The backend can reach the base station.", good: baseStationReachable },
     { label: "Gateway live", detail: gatewayReason ?? "The gateway is passing LoRa traffic between the robot and base station.", good: gatewayWorking },
+    { label: "STM32 live", detail: stm32Online ? `Telemetry is current (${stm32LastSeenLabel}).` : `STM32 telemetry is stale or missing (${stm32LastSeenLabel}).`, good: stm32Online },
     { label: "Robot link live", detail: "Robot telemetry is current.", good: robotLinkState === "online" },
     { label: "GPS ready", detail: "The robot has a valid GPS fix for autonomy.", good: gpsReady },
     { label: "Waypoints committed", detail: "The planned path has been committed to the robot.", good: waypointsCommitted },
@@ -817,6 +827,7 @@ export default function ControllerScreen({
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationOperationalState}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Gateway</Text><Text style={[styles.quickValue, { color: theme.text }]}>{gatewayLabel || gatewayState.toUpperCase()}</Text></View>
+          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>STM32</Text><Text style={[styles.quickValue, { color: theme.text }]}>{stm32StateLabel}</Text></View>
           <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
         </View>
         <Text style={[styles.metaText, { color: theme.muted }]}>
@@ -827,6 +838,9 @@ export default function ControllerScreen({
         </Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>
           Gateway {gatewayLabel || gatewayState.toUpperCase()}{gatewayReason ? ` • ${gatewayReason}` : ''}
+        </Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>
+          STM32 {stm32StateLabel} • Last seen {stm32LastSeenLabel}
         </Text>
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>
