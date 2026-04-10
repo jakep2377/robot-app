@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -244,6 +246,14 @@ type TestMenuResponse = {
 
 type StatusResponse = StatusPayload;
 
+type JoystickState = {
+  x: number;
+  y: number;
+  drive: number;
+  turn: number;
+  active: boolean;
+};
+
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -266,6 +276,100 @@ const MISSION_ENDPOINTS: Record<string, string> = {
   "mission-complete": "/api/mission/complete",
   "push-waypoints": "/api/lora/push-waypoints",
 };
+
+const JOYSTICK_PAD_SIZE = 172;
+const JOYSTICK_KNOB_SIZE = 64;
+const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
+const JOYSTICK_SEND_INTERVAL_MS = 120;
+const JOYSTICK_DEAD_ZONE = 0.18;
+const JOYSTICK_COMMAND_STEP = 4;
+const JOYSTICK_RESPONSE_CURVE = 1.45;
+const JOYSTICK_STRAIGHT_LOCK_THRESHOLD = 0.18;
+const JOYSTICK_STRAIGHT_ASSIST_START = 0.28;
+const JOYSTICK_STRAIGHT_TURN_SCALE = 0.28;
+const JOYSTICK_AXIS_LOCK_MARGIN = 0.2;
+const JOYSTICK_AXIS_LOCK_BREAK = 0.34;
+const JOYSTICK_TURN_WHILE_DRIVING_SCALE = 0.16;
+const JOYSTICK_DRIVE_WHILE_TURNING_SCALE = 0.42;
+
+function clampJoystickAxis(value: number): number {
+  return Math.max(-1, Math.min(1, value));
+}
+
+function applyJoystickDeadZone(value: number): number {
+  const clamped = clampJoystickAxis(value);
+  const magnitude = Math.abs(clamped);
+
+  if (magnitude <= JOYSTICK_DEAD_ZONE) {
+    return 0;
+  }
+
+  const normalized = (magnitude - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE);
+  const curved = Math.pow(normalized, JOYSTICK_RESPONSE_CURVE);
+  return Math.sign(clamped) * curved;
+}
+
+function snapJoystickPercent(value: number): number {
+  const snapped = Math.round(value / JOYSTICK_COMMAND_STEP) * JOYSTICK_COMMAND_STEP;
+  return Math.max(-100, Math.min(100, snapped));
+}
+
+function shapeJoystickVector(
+  rawTurn: number,
+  rawDrive: number,
+  lockedMode: 'free' | 'drive' | 'turn',
+): { turn: number; drive: number; mode: 'free' | 'drive' | 'turn' } {
+  let turnAxis = applyJoystickDeadZone(rawTurn);
+  let driveAxis = applyJoystickDeadZone(rawDrive);
+
+  const absTurn = Math.abs(turnAxis);
+  const absDrive = Math.abs(driveAxis);
+  let mode = lockedMode;
+
+  if (mode === 'free') {
+    if (absDrive >= JOYSTICK_STRAIGHT_ASSIST_START && absDrive - absTurn >= JOYSTICK_AXIS_LOCK_MARGIN) {
+      mode = 'drive';
+    } else if (absTurn >= JOYSTICK_STRAIGHT_ASSIST_START && absTurn - absDrive >= JOYSTICK_AXIS_LOCK_MARGIN) {
+      mode = 'turn';
+    }
+  }
+
+  if (mode === 'drive') {
+    if (absTurn > absDrive + JOYSTICK_AXIS_LOCK_BREAK) {
+      mode = 'turn';
+    } else if (absTurn <= JOYSTICK_STRAIGHT_LOCK_THRESHOLD) {
+      turnAxis = 0;
+    } else {
+      turnAxis *= JOYSTICK_TURN_WHILE_DRIVING_SCALE;
+    }
+  }
+
+  if (mode === 'turn') {
+    if (absDrive > absTurn + JOYSTICK_AXIS_LOCK_BREAK) {
+      mode = 'drive';
+    } else {
+      driveAxis *= JOYSTICK_DRIVE_WHILE_TURNING_SCALE;
+    }
+  }
+
+  if (mode === 'free' && absDrive >= JOYSTICK_STRAIGHT_ASSIST_START) {
+    if (absTurn <= JOYSTICK_STRAIGHT_LOCK_THRESHOLD) {
+      turnAxis = 0;
+    } else if (absTurn < absDrive) {
+      turnAxis *= JOYSTICK_STRAIGHT_TURN_SCALE;
+    }
+  }
+
+  if (absTurn > absDrive + 0.2 && absDrive < 0.34) {
+    driveAxis *= 0.72;
+  }
+
+  return {
+    turn: snapJoystickPercent(turnAxis * 100),
+    drive: snapJoystickPercent(driveAxis * 100),
+    mode,
+  };
+}
 
 function formatReadableValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -374,9 +478,18 @@ export default function ControllerScreen({
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
+  const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
+  const [joystickState, setJoystickState] = useState<JoystickState>(emptyJoystickState);
   const refreshInFlight = useRef(false);
   const heldManualCommand = useRef<string | null>(null);
   const heldManualTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const joystickCommand = useRef({ drive: 0, turn: 0 });
+  const joystickTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const joystickInFlight = useRef(false);
+  const queuedJoystickCommand = useRef<{ drive: number; turn: number; refreshAfter: boolean } | null>(null);
+  const lastJoystickSent = useRef({ drive: 0, turn: 0 });
+  const joystickKnobPosition = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+  const joystickAxisLock = useRef<'free' | 'drive' | 'turn'>('free');
 
   const refresh = async () => {
     if (refreshInFlight.current) {
@@ -455,7 +568,161 @@ export default function ControllerScreen({
     };
   }, [serverUrl]);
 
+  useEffect(() => {
+    return () => {
+      if (heldManualTimer.current) {
+        clearInterval(heldManualTimer.current);
+      }
+      if (joystickTimer.current) {
+        clearInterval(joystickTimer.current);
+      }
+    };
+  }, []);
+
+  const clearHeldManualLoop = () => {
+    if (heldManualTimer.current) {
+      clearInterval(heldManualTimer.current);
+      heldManualTimer.current = null;
+    }
+    heldManualCommand.current = null;
+  };
+
+  const clearJoystickState = () => {
+    joystickCommand.current = { drive: 0, turn: 0 };
+    queuedJoystickCommand.current = null;
+    joystickAxisLock.current = 'free';
+    joystickKnobPosition.stopAnimation();
+    Animated.spring(joystickKnobPosition, {
+      toValue: { x: 0, y: 0 },
+      useNativeDriver: true,
+      speed: 24,
+      bounciness: 0,
+    }).start();
+    setJoystickState((current) => (
+      current.drive === 0 && current.turn === 0 && !current.active ? current : emptyJoystickState
+    ));
+  };
+
+  const postDriveVector = async (drive: number, turn: number, refreshAfter = false) => {
+    const nextDrive = Math.max(-100, Math.min(100, Math.round(drive)));
+    const nextTurn = Math.max(-100, Math.min(100, Math.round(turn)));
+
+    if (joystickInFlight.current) {
+      queuedJoystickCommand.current = { drive: nextDrive, turn: nextTurn, refreshAfter };
+      return;
+    }
+
+    if (lastJoystickSent.current.drive === nextDrive && lastJoystickSent.current.turn === nextTurn) {
+      if (refreshAfter) {
+        await refresh();
+      }
+      return;
+    }
+
+    joystickInFlight.current = true;
+    try {
+      await postText(serverUrl, "/command", `DRIVE,THROTTLE:${nextDrive},TURN:${nextTurn}`);
+      lastJoystickSent.current = { drive: nextDrive, turn: nextTurn };
+      setError(null);
+      if (refreshAfter) {
+        await refresh();
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Manual drive command failed");
+    } finally {
+      joystickInFlight.current = false;
+      const queued = queuedJoystickCommand.current;
+      queuedJoystickCommand.current = null;
+      if (queued && (queued.drive !== nextDrive || queued.turn !== nextTurn || queued.refreshAfter)) {
+        void postDriveVector(queued.drive, queued.turn, queued.refreshAfter);
+      }
+    }
+  };
+
+  const ensureJoystickLoop = () => {
+    if (joystickTimer.current) {
+      return;
+    }
+
+    joystickTimer.current = setInterval(() => {
+      if (!manualControlVisible) {
+        return;
+      }
+      const next = joystickCommand.current;
+      void postDriveVector(next.drive, next.turn);
+    }, JOYSTICK_SEND_INTERVAL_MS);
+  };
+
+  const updateJoystickFromTouch = (locationX: number, locationY: number) => {
+    clearHeldManualLoop();
+
+    const rawX = locationX - JOYSTICK_PAD_SIZE / 2;
+    const rawY = locationY - JOYSTICK_PAD_SIZE / 2;
+    const distance = Math.hypot(rawX, rawY);
+    const scale = distance > JOYSTICK_TRAVEL_RADIUS ? JOYSTICK_TRAVEL_RADIUS / distance : 1;
+    const x = rawX * scale;
+    const y = rawY * scale;
+    const { turn, drive, mode } = shapeJoystickVector(
+      x / JOYSTICK_TRAVEL_RADIUS,
+      (-1 * y) / JOYSTICK_TRAVEL_RADIUS,
+      joystickAxisLock.current,
+    );
+    joystickAxisLock.current = mode;
+    const displayX = (turn / 100) * JOYSTICK_TRAVEL_RADIUS;
+    const displayY = (-drive / 100) * JOYSTICK_TRAVEL_RADIUS;
+    const active = drive !== 0 || turn !== 0;
+
+    joystickKnobPosition.setValue({ x: displayX, y: displayY });
+    joystickCommand.current = { drive, turn };
+    setJoystickState((current) => (
+      current.drive === drive && current.turn === turn && current.active === active
+        ? current
+        : { x: displayX, y: displayY, drive, turn, active }
+    ));
+
+    const shouldKickImmediate = !joystickTimer.current;
+    ensureJoystickLoop();
+    if (shouldKickImmediate) {
+      void postDriveVector(drive, turn);
+    }
+  };
+
+  const releaseJoystickDrive = async (refreshAfter = true) => {
+    if (joystickTimer.current) {
+      clearInterval(joystickTimer.current);
+      joystickTimer.current = null;
+    }
+    clearJoystickState();
+    await postDriveVector(0, 0, refreshAfter);
+  };
+
+  const joystickResponder = useMemo(
+    () => PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (event) => {
+        updateJoystickFromTouch(event.nativeEvent.locationX, event.nativeEvent.locationY);
+      },
+      onPanResponderMove: (event) => {
+        updateJoystickFromTouch(event.nativeEvent.locationX, event.nativeEvent.locationY);
+      },
+      onPanResponderRelease: () => {
+        void releaseJoystickDrive();
+      },
+      onPanResponderTerminate: () => {
+        void releaseJoystickDrive();
+      },
+    }),
+    [manualControlVisible, serverUrl],
+  );
+
   const performCommand = async (command: string) => {
+    if (joystickTimer.current) {
+      clearInterval(joystickTimer.current);
+      joystickTimer.current = null;
+    }
+    clearJoystickState();
+
     setPendingAction(command);
     try {
       await postText(serverUrl, "/command", command.toUpperCase());
@@ -473,10 +740,12 @@ export default function ControllerScreen({
       return;
     }
 
-    if (heldManualTimer.current) {
-      clearInterval(heldManualTimer.current);
-      heldManualTimer.current = null;
+    if (joystickTimer.current) {
+      clearInterval(joystickTimer.current);
+      joystickTimer.current = null;
     }
+    clearJoystickState();
+    clearHeldManualLoop();
 
     heldManualCommand.current = command;
     await performCommand(command);
@@ -490,15 +759,10 @@ export default function ControllerScreen({
   };
 
   const releaseHeldManualCommand = async () => {
-    if (heldManualTimer.current) {
-      clearInterval(heldManualTimer.current);
-      heldManualTimer.current = null;
-    }
-    if (!heldManualCommand.current || pendingAction) {
-      heldManualCommand.current = null;
+    clearHeldManualLoop();
+    if (pendingAction) {
       return;
     }
-    heldManualCommand.current = null;
     await performCommand("STOP");
   };
   const performAction = async (actionId: string) => {
@@ -670,8 +934,8 @@ export default function ControllerScreen({
   const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
   const baseStationReachable = Boolean(connection?.baseStation?.reachable ?? (baseStationState === "online"));
   const connectionPathLabel = connectionMode === 'cloud'
-    ? 'Remote fallback'
-    : connection?.baseStation?.connectionPathLabel ?? connection?.overall?.connectionPathLabel ?? 'Field network';
+    ? 'Remote server'
+    : connection?.baseStation?.connectionPathLabel ?? connection?.overall?.connectionPathLabel ?? 'Server link';
   const baseStationLabel = baseStationReachable
     ? (connection?.baseStation?.connectionPathLabel === 'Remote bridge' ? 'ONLINE (REMOTE)' : 'ONLINE')
     : baseStationState.toUpperCase();
@@ -703,18 +967,24 @@ export default function ControllerScreen({
   const demoSpotGpsStatus = summary?.demo?.spotGpsStatus ?? null;
   const restoredAt = health?.persistence?.restoredAt ?? null;
   const showRecoveryBanner = Boolean(restoredAt && missionState !== "IDLE");
-  const readinessItems = [
-    { label: "Backend", value: backendState.toUpperCase(), good: backendState === "online" },
-    { label: "Connection path", value: connectionPathLabel, good: true },
-    { label: "Base station", value: baseStationOperationalState, good: baseStationReachable },
-    { label: "Gateway", value: gatewayLabel || gatewayState.toUpperCase(), good: gatewayWorking },
-    { label: "STM32", value: `${stm32StateLabel} • ${stm32LastSeenLabel}`, good: stm32Online },
-    { label: "Robot state", value: robotOperationalState, good: robotLinkState === "online" },
-    { label: "GPS ready", value: gpsReady ? "Ready" : "Needs attention", good: gpsReady },
-    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", good: waypointsCommitted },
+  const summaryItems = [
+    { label: "Mission", value: missionState, detail: "Current job" },
+    { label: "Robot", value: robotOperationalState, detail: robotLinkState === "online" ? "Telemetry live" : "Telemetry needs attention" },
+    { label: "Coverage", value: `${coveragePct.toFixed(1)}%`, detail: "Mission progress" },
   ];
+  const systemCheckItems = [
+    { label: "Remote Server", value: backendState.toUpperCase(), detail: connectionPathLabel, good: backendState === "online" },
+    { label: "Base Station", value: baseStationOperationalState, detail: baseStationTransportLabel || "Link status", good: baseStationReachable },
+    { label: "Gateway", value: gatewayLabel || gatewayState.toUpperCase(), detail: gatewayReason ?? "LoRa bridge", good: gatewayWorking },
+    { label: "STM32", value: stm32StateLabel, detail: stm32LastSeenLabel, good: stm32Online },
+    { label: "GPS", value: gpsReady ? "Ready" : "Needs attention", detail: gpsReady ? "Autonomy ready" : "Wait for lock", good: gpsReady },
+    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", detail: commandPathState.toUpperCase(), good: waypointsCommitted },
+  ];
+  const attentionItems = systemCheckItems
+    .filter((item) => item.good === false)
+    .map((item) => item.label);
   const preflightItems = [
-    { label: "Backend connected", detail: "The app can reach the field backend.", good: backendState === "online" },
+    { label: "Server connected", detail: "The app can reach the remote server.", good: backendState === "online" },
     { label: "Base station reachable", detail: connection?.baseStation?.connectionPathLabel === "Remote bridge" ? "The backend is receiving live remote status from the base station." : "The backend can reach the base station.", good: baseStationReachable },
     { label: "Gateway live", detail: gatewayReason ?? "The gateway is passing LoRa traffic between the robot and base station.", good: gatewayWorking },
     { label: "STM32 live", detail: stm32Online ? `Telemetry is current (${stm32LastSeenLabel}).` : `STM32 telemetry is stale or missing (${stm32LastSeenLabel}).`, good: stm32Online },
@@ -757,10 +1027,10 @@ export default function ControllerScreen({
     : connectionMode === 'cloud'
       ? 'Remote'
       : connectionMode === 'manual'
-        ? 'Manual'
+        ? 'Custom'
         : connectionStatus === 'error'
           ? 'Offline'
-          : 'Field';
+          : 'Server';
 
   const shouldHighlightConnection = connectionBusy || connectionStatus === 'error' || connectionMode === 'cloud' || connectionMode === 'manual';
   const formatDemoSpot = (spot?: DemoSpot | null, emptyLabel = "Not marked yet") => {
@@ -780,7 +1050,7 @@ export default function ControllerScreen({
     if (spot?.robot?.gpsFix === false) {
       parts.push("No GPS fix");
     }
-    return parts.join(" � ");
+    return parts.join(" • ");
   };
 
 
@@ -790,7 +1060,7 @@ export default function ControllerScreen({
 
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
-      <Text style={[styles.title, { color: theme.title }]}>Robot Controller</Text>
+      <Text style={[styles.title, { color: theme.title }]}>RAIS Controller</Text>
       <View style={styles.statusRow}>
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
@@ -819,30 +1089,81 @@ export default function ControllerScreen({
       ) : null}
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Quick Status</Text>
-        <View style={styles.quickGrid}>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Mission</Text><Text style={[styles.quickValue, { color: theme.text }]}>{missionState}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Robot State</Text><Text style={[styles.quickValue, { color: theme.text }]}>{robotOperationalState}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Coverage</Text><Text style={[styles.quickValue, { color: theme.text }]}>{coveragePct.toFixed(1)}%</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Field Backend</Text><Text style={[styles.quickValue, { color: theme.text }]}>{backendState.toUpperCase()}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Base Station</Text><Text style={[styles.quickValue, { color: theme.text }]}>{baseStationOperationalState}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Gateway</Text><Text style={[styles.quickValue, { color: theme.text }]}>{gatewayLabel || gatewayState.toUpperCase()}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>STM32</Text><Text style={[styles.quickValue, { color: theme.text }]}>{stm32StateLabel}</Text></View>
-          <View style={styles.quickItem}><Text style={[styles.quickLabel, { color: theme.muted }]}>Command Path</Text><Text style={[styles.quickValue, { color: theme.text }]}>{commandPathState.toUpperCase()}</Text></View>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>System Status</Text>
+
+        <View style={styles.summaryGrid}>
+          {summaryItems.map((item) => (
+            <View
+              key={item.label}
+              style={[
+                styles.summaryItem,
+                item.label === 'Coverage' ? styles.summaryItemWide : null,
+              ]}
+            >
+              <Text style={[styles.quickLabel, { color: theme.muted }]}>{item.label}</Text>
+              <Text style={[styles.summaryValue, { color: theme.text }]}>{item.value}</Text>
+              <Text style={[styles.summaryDetail, { color: theme.muted }]}>{item.detail}</Text>
+            </View>
+          ))}
         </View>
-        <Text style={[styles.metaText, { color: theme.muted }]}>
+
+        <View style={[styles.systemBanner, attentionItems.length ? styles.systemBannerNeeds : styles.systemBannerGood]}>
+          <Text style={styles.systemBannerTitle}>{attentionItems.length ? 'Needs attention' : 'System ready'}</Text>
+          <Text style={styles.systemBannerText}>
+            {attentionItems.length ? attentionItems.join(' • ') : 'Remote server, base station, telemetry, and GPS look ready.'}
+          </Text>
+        </View>
+
+        <View style={styles.systemCheckGrid}>
+          {systemCheckItems.map((item) => (
+            <View
+              key={item.label}
+              style={[
+                styles.systemCheckItem,
+                item.good ? styles.systemCheckItemGood : styles.systemCheckItemNeeds,
+              ]}
+            >
+              <View style={styles.systemCheckTopRow}>
+                <View style={styles.systemCheckLabelBlock}>
+                  <Text style={[styles.quickLabel, { color: theme.muted }]}>{item.label}</Text>
+                  <Text style={[styles.systemCheckValue, { color: item.good ? '#1f7a52' : '#9b5c12' }]}>{item.value}</Text>
+                </View>
+                {item.good ? (
+                  <View style={[styles.quickStateBadge, styles.quickStateBadgeGood]}>
+                    <Text style={styles.quickStateBadgeText}>Ready</Text>
+                  </View>
+                ) : null}
+              </View>
+              <Text style={[styles.systemCheckDetail, { color: theme.muted }]}>{item.detail}</Text>
+            </View>
+          ))}
+        </View>
+
+        <Text style={[styles.metaText, { color: theme.muted }]}> 
           Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"} | Status {status?.last_cmd_status ?? connection?.commandPath?.lastCommandStatus ?? "unknown"} | Queue {connection?.baseStation?.queueDepth ?? status?.queue_depth ?? 0}
         </Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>
+        <Text style={[styles.metaText, { color: theme.muted }]}> 
           Base link {baseStationLabel}{baseStationTransportLabel ? ` • ${baseStationTransportLabel}` : ''}
         </Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>
+        <Text style={[styles.metaText, { color: theme.muted }]}> 
           Gateway {gatewayLabel || gatewayState.toUpperCase()}{gatewayReason ? ` • ${gatewayReason}` : ''}
         </Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>
+        <Text style={[styles.metaText, { color: theme.muted }]}> 
           STM32 {stm32StateLabel} • Last seen {stm32LastSeenLabel}
         </Text>
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
+      </AppCard>
+
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Alerts</Text>
+        {latestAlert ? (
+          <View style={[styles.alertRow, latestAlert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
+            <Text style={styles.alertCode}>{latestAlert.code}</Text>
+            <Text style={styles.alertMessage}>{latestAlert.message}</Text>
+          </View>
+        ) : (
+          <Text style={[styles.metaText, { color: theme.muted }]}>No alerts.</Text>
+        )}
       </AppCard>
 
       <AppCard style={[styles.card, styles.connectionCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -858,7 +1179,7 @@ export default function ControllerScreen({
               </View>
               <Text style={[styles.metaText, { color: theme.text }]}>{connectionLabel}</Text>
               <Text style={[styles.metaText, { color: theme.muted }]} numberOfLines={connectionExpanded ? 2 : 1}>
-                {connectionBusy ? 'Checking field backend...' : connectionDetail}
+                {connectionBusy ? 'Checking server...' : connectionDetail}
               </Text>
               <Text style={[styles.metaText, { color: theme.muted }]}>Path: {connectionPathLabel}</Text>
             </View>
@@ -877,33 +1198,21 @@ export default function ControllerScreen({
         </Pressable>
         {connectionExpanded ? (
           <View style={styles.connectionExpandedBlock}>
-            <Text style={[styles.metaText, { color: theme.muted }]}>
-              The app connects to the backend only. The backend manages the base station and robot link.
+            <Text style={[styles.metaText, { color: theme.muted }]}> 
+              The app connects to the remote server, and that server manages the base station and robot link.
             </Text>
           </View>
         ) : null}
       </AppCard>
 
 
-      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Integration Status</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>A quick view of what is ready across the full system.</Text>
-        <View style={styles.readinessGrid}>
-          {readinessItems.map((item) => (
-            <View key={item.label} style={[styles.readinessItem, item.good ? styles.readinessItemGood : styles.readinessItemNeeds]}>
-              <Text style={[styles.quickLabel, { color: theme.muted }]}>{item.label}</Text>
-              <Text style={[styles.readinessValue, { color: item.good ? '#1f7a52' : '#9b5c12' }]}>{item.value}</Text>
-            </View>
-          ))}
-        </View>
-      </AppCard>
-
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Commit the route, then use Start Auto to run the preflight review and begin autonomy.</Text>
         <View style={styles.missionActionGrid}>
           <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
-          <ActionButton label="Start" onPress={openPreflight} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
+          <ActionButton label="Start Auto" onPress={openPreflight} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
           <ActionButton label="Pause" onPress={() => performAction("mission-pause")} disabled={!allowedAction("mission-pause")?.enabled} busy={pendingAction === "mission-pause"} compact />
           <ActionButton label="Resume" onPress={() => performAction("mission-resume")} disabled={!allowedAction("mission-resume")?.enabled} busy={pendingAction === "mission-resume"} compact />
           <ActionButton label="Finish" onPress={() => performAction("mission-complete")} disabled={!allowedAction("mission-complete")?.enabled} busy={pendingAction === "mission-complete"} compact />
@@ -921,7 +1230,7 @@ export default function ControllerScreen({
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Dispersion</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Material Mix</Text>
         <PercentSlider
           label="Salt"
           value={saltPct}
@@ -935,18 +1244,6 @@ export default function ControllerScreen({
           onChange={setBrinePct}
           accentColor="#2c6fb7"
         />
-      </AppCard>
-
-      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Alerts</Text>
-        {latestAlert ? (
-          <View style={[styles.alertRow, latestAlert.level === "critical" ? styles.alertCritical : styles.alertWarning]}>
-            <Text style={styles.alertCode}>{latestAlert.code}</Text>
-            <Text style={styles.alertMessage}>{latestAlert.message}</Text>
-          </View>
-        ) : (
-          <Text style={[styles.metaText, { color: theme.muted }]}>No alerts.</Text>
-        )}
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -1112,12 +1409,12 @@ export default function ControllerScreen({
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Field Notes</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for handoff.</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for handoff or customer follow-up.</Text>
         <TextInput
           style={[styles.input, styles.noteInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
           value={noteText}
           onChangeText={setNoteText}
-          placeholder="Add a note"
+          placeholder="Add a handoff note for the next operator"
           placeholderTextColor={theme.muted}
           multiline
         />
@@ -1152,8 +1449,8 @@ export default function ControllerScreen({
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View style={styles.modalHeaderText}>
-                <Text style={styles.modalTitle}>Preflight Check</Text>
-                <Text style={styles.modalSubtitle}>A quick review before starting the mission.</Text>
+                <Text style={styles.modalTitle}>Preflight & Autonomy</Text>
+                <Text style={styles.modalSubtitle}>Start Auto runs these checks before autonomy begins.</Text>
               </View>
               <Pressable style={styles.modalCloseButton} onPress={() => setPreflightVisible(false)}>
                 <Text style={styles.modalCloseButtonText}>Close</Text>
@@ -1179,7 +1476,7 @@ export default function ControllerScreen({
 
             <View style={styles.preflightActions}>
               <AppButton
-                label="Start Mission"
+                label="Start Autonomy"
                 onPress={confirmMissionStart}
                 disabled={!missionStartReady || pendingAction === 'mission-start'}
                 variant="success"
@@ -1200,43 +1497,58 @@ export default function ControllerScreen({
         visible={manualControlVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setManualControlVisible(false)}
+        onRequestClose={() => { void releaseJoystickDrive(false); void releaseHeldManualCommand(); setManualControlVisible(false); }}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View style={styles.modalHeaderText}>
-                <Text style={styles.modalTitle}>Manual Control</Text>
-                <Text style={styles.modalSubtitle}>Direct drive controls.</Text>
+                <Text style={styles.modalTitle}>Manual / Joystick Control</Text>
+                <Text style={styles.modalSubtitle}>Use the thumb pad for smoother driving, or hold the buttons for fixed moves.</Text>
               </View>
-              <Pressable style={styles.modalCloseButton} onPress={() => { void releaseHeldManualCommand(); setManualControlVisible(false); }}>
+              <Pressable style={styles.modalCloseButton} onPress={() => { void releaseJoystickDrive(false); void releaseHeldManualCommand(); setManualControlVisible(false); }}>
                 <Text style={styles.modalCloseButtonText}>Close</Text>
               </Pressable>
             </View>
 
             <Text style={styles.modalStatusText}>Mission {missionState} | Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} | Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
+            <Text style={styles.manualHintText}>Slide inside the thumb pad to blend speed and turning together; release anywhere to stop.</Text>
+
+            <View style={styles.manualDrivePanel}>
+              <Text style={styles.manualMiniLabel}>Thumb pad</Text>
+              <View style={styles.joystickPad} {...joystickResponder.panHandlers}>
+                <View style={styles.joystickAxisHorizontal} />
+                <View style={styles.joystickAxisVertical} />
+                <Animated.View
+                  style={[
+                    styles.joystickKnob,
+                    { transform: joystickKnobPosition.getTranslateTransform() },
+                  ]}
+                />
+              </View>
+              <Text style={[styles.joystickReadout, joystickState.active ? styles.joystickReadoutActive : null]}>
+                Drive {joystickState.drive}% • Turn {joystickState.turn}%
+              </Text>
+            </View>
 
             <View style={styles.dpad}>
+              <Text style={styles.manualMiniLabel}>Quick buttons</Text>
               <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("FORWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-
                 <Text style={styles.commandText}>{pendingAction === "FORWARD" ? "FWD..." : "FWD"}</Text>
               </Pressable>
               <View style={styles.row}>
                 <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("LEFT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-
-                  <Text style={styles.commandText}>{pendingAction === "LEFT" ? "LEFT..." : "LEFT"}</Text>
+                  <Text style={styles.commandText}>{pendingAction === "LEFT" ? "TURN L..." : "TURN L"}</Text>
                 </Pressable>
                 <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
                   <Text style={styles.commandText}>{pendingAction === "STOP" ? "STOP..." : "STOP"}</Text>
                 </Pressable>
                 <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("RIGHT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-
-                  <Text style={styles.commandText}>{pendingAction === "RIGHT" ? "RIGHT..." : "RIGHT"}</Text>
+                  <Text style={styles.commandText}>{pendingAction === "RIGHT" ? "TURN R..." : "TURN R"}</Text>
                 </Pressable>
               </View>
               <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("BACKWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-
-                <Text style={styles.commandText}>{pendingAction === "BACKWARD" ? "BACK..." : "BACK"}</Text>
+                <Text style={styles.commandText}>{pendingAction === "BACKWARD" ? "REV..." : "REV"}</Text>
               </Pressable>
             </View>
           </View>
@@ -1289,6 +1601,12 @@ const styles = StyleSheet.create({
     color: "#13233a",
     textAlign: "center",
   },
+  subtitle: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    marginTop: -2,
+  },
   statusRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1332,6 +1650,26 @@ const styles = StyleSheet.create({
   },
   statusPillCritical: {
     backgroundColor: '#b63d3d',
+  },
+  flowCard: {
+    marginTop: 2,
+  },
+  flowSteps: {
+    gap: 10,
+  },
+  flowStep: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#dce6f0',
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  flowStepTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#16324f',
+    marginBottom: 4,
   },
   connectionCard: {
     marginTop: 2,
@@ -1469,40 +1807,114 @@ const styles = StyleSheet.create({
   recoveryTitle: {
     marginBottom: 6,
   },
-  readinessGrid: {
+  summaryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    justifyContent: 'space-between',
     gap: 10,
-    marginTop: 10,
   },
-  readinessItem: {
-    width: '47%',
+  summaryItem: {
+    width: '48.5%',
+    minHeight: 78,
     borderWidth: 1,
+    borderColor: '#e3eaf2',
     borderRadius: 10,
     paddingHorizontal: 10,
-    paddingVertical: 8,
+    paddingVertical: 9,
+    backgroundColor: '#fbfcfe',
     gap: 3,
   },
-  readinessItemGood: {
+  summaryItemWide: {
+    width: '100%',
+    minHeight: 56,
+    paddingVertical: 6,
+  },
+  summaryValue: {
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  summaryDetail: {
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  systemBanner: {
+    width: '100%',
+    alignSelf: 'stretch',
+    marginTop: 10,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    gap: 1,
+  },
+  systemBannerGood: {
     borderColor: '#d4eadf',
     backgroundColor: '#f4fbf7',
   },
-  readinessItemNeeds: {
+  systemBannerNeeds: {
     borderColor: '#f1dfbd',
     backgroundColor: '#fff9ef',
   },
-  readinessValue: {
-    fontSize: 14,
+  systemBannerTitle: {
+    fontSize: 10,
     fontWeight: '800',
+    color: '#16324f',
+    textTransform: 'uppercase',
   },
-  quickItem: {
-    width: "47%",
+  systemBannerText: {
+    fontSize: 10,
+    lineHeight: 14,
+    color: '#4f6275',
+  },
+  systemCheckGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 10,
+  },
+  systemCheckItem: {
+    width: '48.5%',
     borderWidth: 1,
-    borderColor: "#e3eaf2",
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 8,
-    backgroundColor: "#fbfcfe",
+    gap: 4,
+  },
+  systemCheckItemGood: {
+    borderColor: '#d4eadf',
+    backgroundColor: '#f4fbf7',
+  },
+  systemCheckItemNeeds: {
+    borderColor: '#f1dfbd',
+    backgroundColor: '#fff9ef',
+  },
+  systemCheckTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  systemCheckLabelBlock: {
+    flex: 1,
+    gap: 2,
+  },
+  quickStateBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  quickStateBadgeGood: {
+    backgroundColor: '#dff3e8',
+  },
+  quickStateBadgeNeeds: {
+    backgroundColor: '#f7e8cb',
+  },
+  quickStateBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#35506a',
+    textTransform: 'uppercase',
   },
   quickLabel: {
     fontSize: 11,
@@ -1512,6 +1924,18 @@ const styles = StyleSheet.create({
   quickValue: {
     fontSize: 15,
     fontWeight: "700",
+  },
+  systemCheckValue: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  systemCheckDetail: {
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  quickDetail: {
+    fontSize: 11,
+    lineHeight: 15,
   },
   metaText: {
     fontSize: 12,
@@ -1644,6 +2068,73 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "#63788e",
     flexWrap: "wrap",
+  },
+  manualHintText: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: "#4f6275",
+  },
+  manualDrivePanel: {
+    alignItems: "center",
+    gap: 10,
+    marginTop: 2,
+  },
+  manualMiniLabel: {
+    alignSelf: "flex-start",
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#37506a",
+  },
+  joystickPad: {
+    width: JOYSTICK_PAD_SIZE,
+    height: JOYSTICK_PAD_SIZE,
+    borderRadius: JOYSTICK_PAD_SIZE / 2,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#eef4fb",
+    borderWidth: 1,
+    borderColor: "#d4e0ee",
+    position: "relative",
+  },
+  joystickAxisHorizontal: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: "#d1dceb",
+  },
+  joystickAxisVertical: {
+    position: "absolute",
+    top: 20,
+    bottom: 20,
+    width: 2,
+    borderRadius: 999,
+    backgroundColor: "#d1dceb",
+  },
+  joystickKnob: {
+    position: "absolute",
+    top: (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2,
+    left: (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2,
+    width: JOYSTICK_KNOB_SIZE,
+    height: JOYSTICK_KNOB_SIZE,
+    borderRadius: JOYSTICK_KNOB_SIZE / 2,
+    backgroundColor: "#2c6fb7",
+    borderWidth: 3,
+    borderColor: "#ffffff",
+    shadowColor: "#1d3f68",
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  joystickReadout: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#63788e",
+  },
+  joystickReadoutActive: {
+    color: "#174f83",
   },
   preflightList: {
     gap: 10,

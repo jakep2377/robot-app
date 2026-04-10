@@ -22,23 +22,23 @@ export default function AppCard({ title, children, style, contentStyle, titleSty
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: "#ffffff",
+    backgroundColor: "#fbfdff",
     borderWidth: 1,
-    borderColor: "#dde5ef",
-    borderRadius: 16,
-    shadowColor: "#000000",
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    borderColor: "#d8e4f0",
+    borderRadius: 20,
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.07,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
     elevation: 3,
   },
   content: {
-    padding: 16,
-    gap: 10,
+    padding: 18,
+    gap: 12,
   },
   title: {
     fontSize: 18,
-    fontWeight: "700",
+    fontWeight: "800",
     color: "#16324f",
   },
 });

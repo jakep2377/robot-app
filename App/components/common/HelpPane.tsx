@@ -19,70 +19,79 @@ const helpSections: HelpSection[] = [
     title: "Quick Start",
     icon: "check-circle-outline",
     content: [
-      "Open Area Map and tap Draw Area.",
-      "Set the work area, then tap Submit Area.",
-      "Plan the path for the current area.",
-      "Open Controller to commit the path and start the mission.",
-      "Use Manual Control only when direct driving is needed.",
+      "Open Plan and tap Mark Work Area.",
+      "Pick two opposite corners, then send the area to the planner.",
+      "Build the route for the current salt and brine mix.",
+      "Switch to Operate to commit the route and start the mission.",
+      "Use manual control only for short positioning moves or recovery.",
     ],
   },
   {
     title: "Connection",
     icon: "lan-connect",
     content: [
-      "The app connects to the backend only.",
-      "The backend manages the base station and robot link.",
-      "Field network is the normal path.",
-      "Direct backup means the backend is using the base station fallback path.",
-      "Remote fallback should only be used when a field backend is not available.",
+      "The phone app talks to the remote server, not directly to the robot.",
+      "Use the default remote server for normal operation.",
+      "Manual server entry is only needed when support gives you a different address.",
+      "The server manages the base station and robot link for you.",
     ],
   },
   {
-    title: "Area Map",
+    title: "System Status",
+    icon: "view-dashboard-outline",
+    content: [
+      "Mission, Robot, and Coverage at the top give the quick job summary.",
+      "The cards below show whether the remote server, base station, gateway, STM32, GPS, and waypoints are ready.",
+      "If the banner says Needs attention, fix those items before starting autonomy.",
+      "Alerts are placed high on the Operate screen so issues are easier to catch quickly.",
+    ],
+  },
+  {
+    title: "Plan",
     icon: "map-marker-path",
     content: [
-      "Drag the corner markers to shape the work area.",
-      "Submit Area saves the boundary for planning.",
-      "Plan Path builds the coverage route with the current salt and brine values.",
-      "Use Clear to remove the current area and start over.",
+      "Drag any corner marker if the work zone needs a quick adjustment.",
+      "Send Area stores the lot boundary for the planner.",
+      "Build Route creates the coverage pass the robot will follow.",
+      "Start Over clears the current selection so you can redraw the job cleanly.",
     ],
   },
   {
-    title: "Controller",
+    title: "Operate",
     icon: "gamepad-variant-outline",
     content: [
-      "Quick Status shows mission, coverage, and system readiness.",
-      "Integration Status shows backend, base station, robot link, GPS, and waypoints.",
-      "Mission Controls handle commit, start, pause, resume, complete, and abort.",
-      "Field Notes are for short handoff notes.",
+      "Start with System Status and fix anything marked Needs attention.",
+      "Use Commit after a route is built on the Plan tab.",
+      "Start Auto runs the preflight review and then begins autonomy once the system is ready.",
+      "Field Notes are a simple handoff log for the next operator or support tech.",
     ],
   },
   {
     title: "Manual Control",
     icon: "controller-classic-outline",
     content: [
-      "Open Manual Control from Controller.",
-      "Use FWD, LEFT, RIGHT, BACK, and STOP for short direct moves.",
-      "Use E-Stop any time an immediate stop is needed.",
+      "Open Manual / Joystick Control from Operate whenever you need direct positioning.",
+      "Hold FWD or REV to move, and use TURN L or TURN R to pivot the robot into position.",
+      "Release any drive button to send stop, and use E-Stop immediately for unsafe motion.",
     ],
   },
   {
     title: "Weather",
     icon: "weather-snowy",
     content: [
-      "Weather suggests a treatment mix based on current or forecast conditions.",
-      "Look Ahead helps choose a service window over the next several days.",
-      "Schedule Service asks for phone location and alerts only when needed.",
+      "This screen recommends a treatment mix based on current and forecast conditions.",
+      "Next 5 Days helps you choose a better service window before conditions worsen.",
+      "Create Reminder can send a phone alert ahead of the selected service time.",
     ],
   },
   {
     title: "Troubleshooting",
     icon: "lightbulb-on-outline",
     content: [
-      "If Start Mission is blocked, check Integration Status first.",
-      "If the robot link is stale, verify the base station and LoRa path.",
-      "If a mission was restored after restart, review the system before resuming.",
-      "If something still looks off, use the server console for deeper testing.",
+      "If Start is blocked, read the readiness cards from top to bottom first.",
+      "If telemetry looks stale, verify the backend, base station, and LoRa path before retrying autonomy.",
+      "If the app reconnects after a restart, review the restored mission state before resuming work.",
+      "Use the server dashboard for deeper service checks when the phone view is not enough.",
     ],
   },
 ];
@@ -100,7 +109,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
       <View style={styles.header}>
         <View style={styles.headerTitleRow}>
           <MaterialCommunityIcons name="help-circle-outline" size={24} color="#2c6fb7" />
-          <Text style={styles.headerTitle}>Help & Guide</Text>
+          <Text style={styles.headerTitle}>Guide & Quick Help</Text>
         </View>
         {visible === false && onClose ? (
           <AppButton label="Close" onPress={onClose} variant="outline" style={styles.closeButton} />
@@ -108,6 +117,20 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
       </View>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
+        <AppCard style={styles.introCard}>
+          <Text style={styles.introEyebrow}>Normal operator flow</Text>
+          <Text style={styles.introTitle}>Plan the lot, commit the route, then monitor the mission.</Text>
+          <Text style={styles.introText}>
+            Most jobs follow the same sequence, so new operators can get started with less coaching.
+          </Text>
+          <View style={styles.flowList}>
+            <View style={styles.flowChip}><Text style={styles.flowChipText}>1. Plan</Text></View>
+            <View style={styles.flowChip}><Text style={styles.flowChipText}>2. Commit</Text></View>
+            <View style={styles.flowChip}><Text style={styles.flowChipText}>3. Start</Text></View>
+            <View style={styles.flowChip}><Text style={styles.flowChipText}>4. Monitor</Text></View>
+          </View>
+        </AppCard>
+
         {helpSections.map((section, index) => (
           <AppCard key={section.title} style={styles.sectionContainer} contentStyle={styles.sectionCardContent}>
             <Pressable style={styles.sectionHeader} onPress={() => setExpandedIndex(expandedIndex === index ? null : index)}>
@@ -120,7 +143,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
               <View style={styles.sectionContent}>
                 {section.content.map((line) => (
                   <Text key={`${section.title}-${line}`} style={styles.contentText}>
-                    {line}
+                    • {line}
                   </Text>
                 ))}
               </View>
@@ -168,6 +191,44 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 8,
   },
+  introCard: {
+    marginBottom: 12,
+    backgroundColor: "#f8fbff",
+  },
+  introEyebrow: {
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    color: "#63788e",
+  },
+  introTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#16324f",
+  },
+  introText: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: "#35506a",
+  },
+  flowList: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  flowChip: {
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: "#eaf2fb",
+    borderWidth: 1,
+    borderColor: "#d6e5f6",
+  },
+  flowChipText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#2c6fb7",
+  },
   sectionContainer: {
     marginBottom: 12,
     overflow: "hidden",
@@ -208,7 +269,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     color: "#35506a",
-    marginBottom: 4,
+    marginBottom: 6,
   },
 });
 

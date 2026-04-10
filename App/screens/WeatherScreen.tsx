@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
+import AppNoticeModal from "../components/common/AppNoticeModal";
+import { getJsonAllowError, postJson } from "../lib/serverApi";
 import {
   formatForecastLabel,
   formatShiftedDayKey,
@@ -39,6 +41,7 @@ type ForecastPayload = {
 };
 
 type Props = {
+  serverUrl: string;
   saltPct: number;
   brinePct: number;
   setSaltPct: (value: number) => void;
@@ -49,6 +52,28 @@ type LocationState = { latitude: number; longitude: number; label: string; sourc
 type ScheduleTarget = { at: number; label: string; mix: Mix; condition: string } | null;
 type LookAheadItem = { at: number; label: string; tempText: string; condition: string; mixText: string; mix: Mix };
 type LookAheadDay = { key: string; label: string; items: LookAheadItem[] };
+type AutomationStatus = {
+  enabled?: boolean;
+  scheduledRunAt?: number | null;
+  label?: string | null;
+  lastResult?: string | null;
+  lastError?: string | null;
+};
+
+type NoticeAction = {
+  label: string;
+  onPress?: () => void;
+  variant?: "primary" | "secondary" | "outline" | "danger" | "success";
+};
+
+type NoticeState = {
+  visible: boolean;
+  title: string;
+  message: string;
+  tone: "info" | "success" | "warning" | "danger";
+  primaryAction?: NoticeAction | null;
+  secondaryAction?: NoticeAction | null;
+};
 
 const API_KEY = "e324705094164f5dc98161647cccc83a";
 const DEFAULT_LOCATION: LocationState = { latitude: 41.0814, longitude: -81.519, label: "Akron", source: "city" };
@@ -112,7 +137,33 @@ function getNotificationsModule() {
   }
 }
 
-export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
+function describeAutomationStatus(automation: AutomationStatus | null | undefined) {
+  const scheduledRunAt = Number(automation?.scheduledRunAt ?? 0) || 0;
+  if (automation?.enabled && scheduledRunAt > 0) {
+    return {
+      armed: true,
+      text: `Auto run armed for ${new Date(scheduledRunAt).toLocaleString()}. The server will launch autonomy when the service window opens if the route is ready.`,
+    };
+  }
+  if (automation?.lastError) {
+    return {
+      armed: false,
+      text: `Auto run status: ${automation.lastError}`,
+    };
+  }
+  if (automation?.lastResult) {
+    return {
+      armed: false,
+      text: `Auto run status: ${automation.lastResult}.`,
+    };
+  }
+  return {
+    armed: false,
+    text: "Automatic autonomy is not armed.",
+  };
+}
+
+export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
   const insets = useSafeAreaInsets();
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
   const [forecast, setForecast] = useState<ForecastPayload | null>(null);
@@ -122,6 +173,9 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [locating, setLocating] = useState(false);
   const [notificationState, setNotificationState] = useState("Notifications are off");
   const [scheduledAlertText, setScheduledAlertText] = useState("No service alert is scheduled.");
+  const [automationStatusText, setAutomationStatusText] = useState("Automatic autonomy is not armed.");
+  const [automationArmed, setAutomationArmed] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
   const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
   const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
   const [selectedLookAheadDay, setSelectedLookAheadDay] = useState("");
@@ -129,6 +183,29 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const [customTimeText, setCustomTimeText] = useState("");
   const [manualScheduleTarget, setManualScheduleTarget] = useState<ScheduleTarget>(null);
   const [showLookAhead, setShowLookAhead] = useState(false);
+  const locationPromptedRef = useRef(false);
+  const [notice, setNotice] = useState<NoticeState>({
+    visible: false,
+    title: "",
+    message: "",
+    tone: "info",
+    primaryAction: null,
+    secondaryAction: null,
+  });
+
+  const closeNotice = () => {
+    setNotice((current) => ({ ...current, visible: false }));
+  };
+
+  const showNotice = ({
+    title,
+    message,
+    tone = "info",
+    primaryAction = null,
+    secondaryAction = null,
+  }: Omit<NoticeState, "visible">) => {
+    setNotice({ visible: true, title, message, tone, primaryAction, secondaryAction });
+  };
 
   const loadWeather = async (location: LocationState) => {
     const TEST_CASE: "none" | "light" | "medium" | "heavy" | "severe" = "heavy";
@@ -431,12 +508,20 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     try {
       const Location = getLocationModule();
       if (!Location) {
-        Alert.alert("Rebuild Needed", "Location support was added recently. Rebuild the Android app to use phone-based scheduling.");
+        showNotice({
+          title: "Rebuild needed",
+          message: "Location support was added recently. Rebuild the Android app to use phone-based scheduling.",
+          tone: "warning",
+        });
         return false;
       }
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== "granted") {
-        Alert.alert("Location Needed", "Allow location access to build scheduling from the phone's position.");
+        showNotice({
+          title: "Location needed",
+          message: "Allow location access so the app can choose the right service window from your current position.",
+          tone: "warning",
+        });
         return false;
       }
       const lastKnown = await Location.getLastKnownPositionAsync();
@@ -451,11 +536,27 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     }
   };
 
+  useEffect(() => {
+    if (loading || locationPromptedRef.current) return;
+    locationPromptedRef.current = true;
+    showNotice({
+      title: "Use current location?",
+      message: "Allow it once to align the forecast and scheduling window with your phone's current position.",
+      tone: "info",
+      primaryAction: { label: "Use Current Location", onPress: () => { void usePhoneLocation(); } },
+      secondaryAction: { label: "Use Saved City", variant: "outline" },
+    });
+  }, [loading]);
+
   const enableAlerts = async () => {
     const Notifications = getNotificationsModule();
     if (!Notifications) {
       setNotificationState("Notifications are unavailable");
-      Alert.alert("Rebuild Needed", "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.");
+      showNotice({
+        title: "Rebuild needed",
+        message: "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.",
+        tone: "warning",
+      });
       return false;
     }
 
@@ -478,41 +579,62 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
     const permission = await Notifications.requestPermissionsAsync();
     if (!permission.granted) {
       setNotificationState("Notifications are disabled");
-      Alert.alert("Notifications Disabled", "Allow notifications if you want scheduling alerts on this phone.");
+      showNotice({
+        title: "Notifications disabled",
+        message: "Allow notifications if you want scheduling reminders to pop up on this phone.",
+        tone: "warning",
+      });
       return false;
     }
     setNotificationState("Notifications are enabled");
     return true;
   };
 
+  const applyAutomationStatus = (automation: AutomationStatus | null | undefined) => {
+    const status = describeAutomationStatus(automation);
+    setAutomationArmed(status.armed);
+    setAutomationStatusText(status.text);
+  };
+
+  const refreshAutomationStatus = async () => {
+    const result = await getJsonAllowError<{ ok?: boolean; automation?: AutomationStatus }>(serverUrl, "/api/mission/schedule");
+    if (result.ok && result.data?.ok) {
+      applyAutomationStatus(result.data.automation ?? null);
+    }
+  };
+
+  useEffect(() => {
+    void refreshAutomationStatus();
+  }, [serverUrl]);
+
   const applyCustomScheduleTime = () => {
     const match = customTimeText.trim().match(/^(\d{1,2}):(\d{2})$/);
     if (!match) {
-      Alert.alert("Enter Time", "Use HH:MM for the selected day.");
+      showNotice({ title: "Enter time", message: "Use HH:MM for the selected day.", tone: "warning" });
       return;
     }
 
     const hours = Number.parseInt(match[1], 10);
     const minutes = Number.parseInt(match[2], 10);
     if (hours > 23 || minutes > 59) {
-      Alert.alert("Invalid Time", "Use a valid 24-hour time like 06:30 or 18:45.");
+      showNotice({ title: "Invalid time", message: "Use a valid 24-hour time like 06:30 or 18:45.", tone: "warning" });
       return;
     }
 
     const dayKey = selectedLookAheadDay || lookAheadDays[0]?.key;
     if (!dayKey) {
-      Alert.alert("No Forecast Day", "Load the forecast first, then choose a time.");
+      showNotice({ title: "No forecast day", message: "Load the forecast first, then choose a time.", tone: "warning" });
       return;
     }
 
     const timezone = forecast?.city?.timezone ?? weather?.timezone ?? 0;
     const scheduledAt = resolveScheduledUnix(dayKey, `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`, timezone);
     if (scheduledAt == null) {
-      Alert.alert("Invalid Time", "Use a valid 24-hour time like 06:30 or 18:45.");
+      showNotice({ title: "Invalid time", message: "Use a valid 24-hour time like 06:30 or 18:45.", tone: "warning" });
       return;
     }
     if (scheduledAt <= Math.floor(Date.now() / 1000)) {
-      Alert.alert("Pick A Future Time", "Choose a time that has not already passed.");
+      showNotice({ title: "Pick a future time", message: "Choose a time that has not already passed.", tone: "warning" });
       return;
     }
 
@@ -520,7 +642,7 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
       Math.abs(entry.dt - scheduledAt) < Math.abs(closest.dt - scheduledAt) ? entry : closest
     );
     if (!closestEntry) {
-      Alert.alert("No Forecast Data", "There is no forecast data available for that time yet.");
+      showNotice({ title: "No forecast data", message: "There is no forecast data available for that time yet.", tone: "warning" });
       return;
     }
 
@@ -546,33 +668,73 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const scheduleAlert = async () => {
     const target = selectedLookAheadTarget ?? manualScheduleTarget ?? suggestion;
     if (!target) {
-      Alert.alert("No Service Time", "Choose a forecast time or set a manual time first.");
+      showNotice({ title: "No service time", message: "Choose a forecast time or set a manual time first.", tone: "warning" });
       return;
-    }
-    if (activeLocation.source !== "phone") {
-      const locationReady = await usePhoneLocation();
-      if (!locationReady) {
-        return;
-      }
     }
     const Notifications = getNotificationsModule();
     if (!Notifications) {
       setNotificationState("Alerts unavailable");
-      Alert.alert("Rebuild Needed", "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.");
+      showNotice({
+        title: "Rebuild needed",
+        message: "Notification support was added recently. Rebuild the Android app to enable scheduling alerts.",
+        tone: "warning",
+      });
       return;
     }
     const ok = await enableAlerts();
     if (!ok) return;
+
     const notifyAt = new Date(Math.max(Date.now() + 60_000, target.at * 1000 - 30 * 60 * 1000));
     await Notifications.cancelAllScheduledNotificationsAsync();
     await Notifications.scheduleNotificationAsync({
       content: {
-        title: "Weather operating window",
-        body: `${target.label}: Salt ${target.mix.saltPct}% | Brine ${target.mix.brinePct}%`,
+        title: "Navigator service window",
+        subtitle: "Auto run reminder",
+        body: `${target.label} • Salt ${target.mix.saltPct}% • Brine ${target.mix.brinePct}%`,
+        sound: false,
       },
       trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: notifyAt, channelId: "weather-scheduler" },
     });
-    setScheduledAlertText(`Service alert scheduled for ${notifyAt.toLocaleString()}.`);
+
+    setAutomationBusy(true);
+    try {
+      const automationResponse = await postJson<{ ok: boolean; automation?: AutomationStatus }>(serverUrl, "/api/mission/schedule", {
+        at: target.at,
+        label: `${target.label} • Salt ${target.mix.saltPct}% • Brine ${target.mix.brinePct}%`,
+        notify: true,
+      });
+      applyAutomationStatus(automationResponse.automation ?? null);
+      setScheduledAlertText(`Reminder set for ${notifyAt.toLocaleString()} and auto run armed for ${target.label}.`);
+    } catch (requestError) {
+      setScheduledAlertText(`Service alert scheduled for ${notifyAt.toLocaleString()}.`);
+      applyAutomationStatus({ lastError: requestError instanceof Error ? requestError.message : "Automatic run could not be armed." });
+      showNotice({
+        title: "Reminder set, auto run not armed",
+        message: requestError instanceof Error
+          ? `The phone reminder is ready, but the server could not arm the automatic run: ${requestError.message}`
+          : "The phone reminder is ready, but the server could not arm the automatic run.",
+        tone: "warning",
+      });
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const cancelAutoRun = async () => {
+    setAutomationBusy(true);
+    try {
+      const response = await postJson<{ ok: boolean; automation?: AutomationStatus }>(serverUrl, "/api/mission/schedule/cancel", {});
+      applyAutomationStatus(response.automation ?? null);
+      setScheduledAlertText("Automatic run cleared. The phone reminder will stay until you replace it.");
+    } catch (requestError) {
+      showNotice({
+        title: "Cancel failed",
+        message: requestError instanceof Error ? requestError.message : "Could not cancel the automatic run.",
+        tone: "danger",
+      });
+    } finally {
+      setAutomationBusy(false);
+    }
   };
 
   if (loading) return <View style={[styles.centerState, { paddingTop: insets.top }]}><ActivityIndicator size="large" /><Text style={styles.metaText}>Loading weather...</Text></View>;
@@ -589,116 +751,200 @@ export default function WeatherScreen({ saltPct, brinePct, setSaltPct, setBrineP
   const scheduleTarget = selectedLookAheadTarget ?? manualScheduleTarget ?? suggestion;
 
   return (
-    <ScrollView contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 8 }]}>
-      <AppCard style={styles.card}>
-        <Text style={styles.eyebrow}>Weather</Text>
-        <Text style={styles.title}>{activeLocation.label}</Text>
-        <View style={styles.heroRow}>
-          <MaterialCommunityIcons name={weatherIcon} size={54} color="#d6e1ec" />
-          <View style={styles.heroText}>
-            <Text style={styles.temp}>{Math.round(weather.main.temp)}{"\u00B0F"}</Text>
-            <Text style={styles.subtitle}>{weather.weather?.[0]?.description ?? "Unknown"}</Text>
+    <>
+      <ScrollView contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 8 }]}>
+      <AppCard style={[styles.card, styles.weatherHeroCard]} contentStyle={styles.weatherHeroContent}>
+        <View style={styles.heroTopRow}>
+          <View style={styles.heroTitleBlock}>
+            <Text style={styles.eyebrowLight}>Navigator Forecast</Text>
+            <Text style={styles.titleHero}>{activeLocation.label}</Text>
+            <Text style={styles.subtitleHero}>
+              {activeLocation.source === "phone" ? "Forecast source: current location" : "Forecast source: saved city"}
+            </Text>
+          </View>
+          <View style={styles.heroIconChip}>
+            <MaterialCommunityIcons name={weatherIcon} size={42} color="#f8fbff" />
           </View>
         </View>
-        <View style={[styles.callout, badgeStyle]}><Text style={styles.calloutText}>{frost.text}</Text></View>
-        <View style={styles.headerMetaRow}>
-          <Text style={styles.metaText}>Updated {formatLocalTime(weather.dt, weather.timezone)}</Text>
-          <AppButton label="Refresh" onPress={() => loadWeather(activeLocation)} variant="secondary" />
+
+        <View style={styles.heroStatsRow}>
+          <View style={styles.heroText}>
+            <Text style={styles.tempHero}>{Math.round(weather.main.temp)}{"\u00B0F"}</Text>
+            <Text style={styles.subtitleHero}>{weather.weather?.[0]?.description ?? "Unknown"}</Text>
+          </View>
+          <View style={styles.heroMetaStack}>
+            <Text style={styles.heroMetaLabel}>Updated {formatLocalTime(weather.dt, weather.timezone)}</Text>
+            <Text style={styles.heroMetaLabel}>Wind {(weather.wind?.speed ?? 0).toFixed(1)} mph</Text>
+          </View>
+        </View>
+
+        <View style={[styles.callout, badgeStyle, styles.heroCallout]}><Text style={styles.calloutText}>{frost.text}</Text></View>
+
+        <View style={styles.heroActionsRow}>
+          <AppButton
+            label={locating ? "Updating Location..." : activeLocation.source === "phone" ? "Refresh Location" : "Use Current Location"}
+            onPress={usePhoneLocation}
+            variant="outline"
+            style={styles.heroActionButton}
+          />
+          <AppButton label="Refresh Forecast" onPress={() => loadWeather(activeLocation)} variant="secondary" style={styles.heroActionButton} />
         </View>
       </AppCard>
 
-      <AppCard title="Recommended Mix" style={styles.card}>
+      <AppCard title="Treatment Recommendation" style={styles.card}>
         <View style={styles.row}>
           <ValuePill label="Salt" value={`${currentMix.saltPct}%`} />
           <ValuePill label="Brine" value={`${currentMix.brinePct}%`} />
         </View>
-        {currentMix.saltPct === 0 && currentMix.brinePct === 0 ? <Text style={[styles.callout, styles.badgeLow, styles.calloutText]}>Current conditions do not warrant treatment.</Text> : null}
-        <Text style={styles.currentText}>Current: Salt {clampPct(saltPct)}% | Brine {clampPct(brinePct)}%</Text>
-        <Text style={styles.manualLabel}>Manual Entry</Text>
+        {currentMix.saltPct === 0 && currentMix.brinePct === 0 ? <Text style={[styles.callout, styles.badgeLow, styles.calloutText]}>No treatment is recommended right now.</Text> : null}
+        <Text style={styles.currentText}>Controller mix: Salt {clampPct(saltPct)}% | Brine {clampPct(brinePct)}%</Text>
+        <Text style={styles.supportingText}>Apply the suggested values directly or override them manually for the current job.</Text>
+        <Text style={styles.manualLabel}>Manual override</Text>
         <View style={styles.manualRow}>
           <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Salt</Text><TextInput style={styles.manualInput} value={manualSaltText} onChangeText={(text) => setManualSaltText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
           <View style={styles.manualField}><Text style={styles.manualFieldLabel}>Brine</Text><TextInput style={styles.manualInput} value={manualBrineText} onChangeText={(text) => setManualBrineText(text.replace(/[^0-9]/g, "").slice(0, 3))} keyboardType="number-pad" maxLength={3} /></View>
-          <AppButton label="Set" onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }} style={styles.manualButton} />
+          <AppButton label="Use Values" onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }} style={styles.manualButton} />
         </View>
         <Text style={[styles.callout, styles.badgeBlue, styles.calloutText]}>{currentMix.reason}</Text>
         <AppButton
-          label={currentApplied ? "Applied" : "Apply Recommendation"}
+          label={currentApplied ? "Applied" : "Apply to Controller"}
           onPress={() => { setSaltPct(currentMix.saltPct); setBrinePct(currentMix.brinePct); }}
           variant={currentApplied ? "primary" : "success"}
           style={[styles.applyButton, currentApplied ? styles.applyButtonDone : null]}
         />
       </AppCard>
 
-      <AppCard title="Scheduling Mode" style={styles.card}>
-        <Text style={styles.metaText}>Forecast source: {activeLocation.source === "phone" ? "Phone location" : "Saved city location"}</Text>
-        <Text style={styles.schedulePrimary}>{scheduleTarget ? `Suggested service time: ${scheduleTarget.label}` : "No service event is recommended in the next 36 hours."}</Text>
-        <Text style={styles.scheduleMeta}>{scheduleTarget ? `Recommended mix: ${scheduleTarget.mix.saltPct}% salt | ${scheduleTarget.mix.brinePct}% brine | ${scheduleTarget.condition}` : "The near-term forecast does not currently indicate a recommended service window."}</Text>
-        <Text style={styles.scheduleMeta}>{notificationState}</Text>
-        <Text style={styles.scheduleMeta}>{scheduledAlertText}</Text>
-        <View style={styles.lookAheadHeader}>
-          <Text style={styles.lookAheadTitle}>Look Ahead</Text>
-          <AppButton label={showLookAhead ? "Hide" : "Show"} onPress={() => setShowLookAhead((value) => !value)} variant="outline" compact style={styles.lookAheadToggle} />
-        </View>
-        {showLookAhead ? (
-          <>
-            <View style={styles.lookAheadMenu}>
-              {lookAheadDays.map((day) => (
-                <AppButton
-                  key={day.key}
-                  label={day.label}
-                  onPress={() => setSelectedLookAheadDay(day.key)}
-                  variant={day.key === activeLookAheadDay?.key ? "primary" : "outline"}
-                  compact
-                  style={[styles.lookAheadMenuButton, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuButtonActive : null]}
-                  textStyle={[styles.lookAheadMenuText, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuTextActive : null]}
-                />
-              ))}
+      <AppCard title="Service Planner" style={styles.card}>
+        <View style={styles.plannerSection}>
+          <View style={styles.plannerHeaderRow}>
+            <View style={styles.plannerHeaderText}>
+              <Text style={styles.plannerSectionLabel}>Forecast window</Text>
+              <Text style={styles.scheduleMeta}>Source: {activeLocation.source === "phone" ? "Current location" : "Saved city"}</Text>
             </View>
-            <View style={styles.lookAheadList}>
-              {activeLookAheadDay?.items.map((item) => (
-                <AppButton
-                  key={`${activeLookAheadDay.key}-${item.label}`}
-                  label=""
-                  style={[styles.lookAheadCard, item.at === selectedLookAheadAt ? styles.lookAheadCardActive : null]}
-                  onPress={() => {
-                    setSelectedLookAheadAt(item.at);
-                    setManualScheduleTarget(null);
-                  }}
-                >
-                  <View>
-                    <Text style={[styles.lookAheadLabel, item.at === selectedLookAheadAt ? styles.lookAheadLabelActive : null]}>{item.label}</Text>
-                    <Text style={[styles.lookAheadTemp, item.at === selectedLookAheadAt ? styles.lookAheadTempActive : null]}>{item.tempText}</Text>
-                    <Text style={[styles.lookAheadCondition, item.at === selectedLookAheadAt ? styles.lookAheadConditionActive : null]}>{item.condition}</Text>
-                    <Text style={[styles.lookAheadMix, item.at === selectedLookAheadAt ? styles.lookAheadMixActive : null]}>{item.mixText}</Text>
-                  </View>
-                </AppButton>
-              ))}
-            </View>
-          </>
-        ) : null}
-        <Text style={styles.scheduleMeta}>Select a forecast time or enter a manual service time for the selected day.</Text>
-        <View style={styles.manualScheduleRow}>
-          <TextInput
-            style={styles.manualScheduleInput}
-            value={customTimeText}
-            onChangeText={(text) => setCustomTimeText(text.replace(/[^0-9:]/g, "").slice(0, 5))}
-            placeholder="HH:MM"
-            placeholderTextColor="#8aa0b6"
-            keyboardType="numbers-and-punctuation"
-            maxLength={5}
-          />
-          <AppButton label="Use Time" onPress={applyCustomScheduleTime} variant="secondary" style={styles.manualScheduleButton} />
+            <AppButton
+              label={showLookAhead ? "Hide Forecast" : "Show Forecast"}
+              onPress={() => setShowLookAhead((value) => !value)}
+              variant="outline"
+              compact
+              style={styles.lookAheadToggle}
+            />
+          </View>
+
+          <Text style={styles.schedulePrimary}>
+            {scheduleTarget ? `Recommended window: ${scheduleTarget.label}` : "No recommended service window in the next 36 hours."}
+          </Text>
+          <Text style={styles.scheduleMeta}>
+            {scheduleTarget
+              ? `Suggested mix: ${scheduleTarget.mix.saltPct}% salt • ${scheduleTarget.mix.brinePct}% brine • ${scheduleTarget.condition}`
+              : "Review the forecast or set a manual time for the next service run."}
+          </Text>
+
+          {showLookAhead ? (
+            <>
+              <View style={styles.lookAheadMenu}>
+                {lookAheadDays.map((day) => (
+                  <AppButton
+                    key={day.key}
+                    label={day.label}
+                    onPress={() => setSelectedLookAheadDay(day.key)}
+                    variant={day.key === activeLookAheadDay?.key ? "primary" : "outline"}
+                    compact
+                    style={[styles.lookAheadMenuButton, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuButtonActive : null]}
+                    textStyle={[styles.lookAheadMenuText, day.key === activeLookAheadDay?.key ? styles.lookAheadMenuTextActive : null]}
+                  />
+                ))}
+              </View>
+              <View style={styles.lookAheadList}>
+                {activeLookAheadDay?.items.map((item) => (
+                  <AppButton
+                    key={`${activeLookAheadDay.key}-${item.label}`}
+                    label=""
+                    style={[styles.lookAheadCard, item.at === selectedLookAheadAt ? styles.lookAheadCardActive : null]}
+                    onPress={() => {
+                      setSelectedLookAheadAt(item.at);
+                      setManualScheduleTarget(null);
+                    }}
+                  >
+                    <View>
+                      <Text style={[styles.lookAheadLabel, item.at === selectedLookAheadAt ? styles.lookAheadLabelActive : null]}>{item.label}</Text>
+                      <Text style={[styles.lookAheadTemp, item.at === selectedLookAheadAt ? styles.lookAheadTempActive : null]}>{item.tempText}</Text>
+                      <Text style={[styles.lookAheadCondition, item.at === selectedLookAheadAt ? styles.lookAheadConditionActive : null]}>{item.condition}</Text>
+                      <Text style={[styles.lookAheadMix, item.at === selectedLookAheadAt ? styles.lookAheadMixActive : null]}>{item.mixText}</Text>
+                    </View>
+                  </AppButton>
+                ))}
+              </View>
+            </>
+          ) : null}
+
+          <Text style={styles.scheduleMeta}>Choose a forecast slot or enter a manual time.</Text>
+          <View style={styles.manualScheduleRow}>
+            <TextInput
+              style={styles.manualScheduleInput}
+              value={customTimeText}
+              onChangeText={(text) => setCustomTimeText(text.replace(/[^0-9:]/g, "").slice(0, 5))}
+              placeholder="HH:MM"
+              placeholderTextColor="#8aa0b6"
+              keyboardType="numbers-and-punctuation"
+              maxLength={5}
+            />
+            <AppButton label="Use Time" onPress={applyCustomScheduleTime} variant="secondary" style={styles.manualScheduleButton} />
+          </View>
         </View>
-        <AppButton label={locating ? "Updating Location..." : "Update From Phone Location"} onPress={usePhoneLocation} variant="outline" style={styles.secondaryButton} />
-        <AppButton label="Schedule Service" onPress={scheduleAlert} disabled={!scheduleTarget} style={[styles.primaryScheduleButton, !scheduleTarget ? styles.primaryScheduleButtonDisabled : null]} />
+
+        <View style={styles.plannerDivider} />
+
+        <View style={styles.plannerSection}>
+          <Text style={styles.plannerSectionLabel}>Automation</Text>
+          <Text style={styles.scheduleMeta}>{notificationState}</Text>
+          <Text style={styles.scheduleMeta}>{scheduledAlertText}</Text>
+          <Text style={styles.scheduleMeta}>{automationStatusText}</Text>
+          <View style={styles.plannerActionRow}>
+            <AppButton
+              label={automationBusy ? "Arming Auto Run..." : "Arm Auto Run + Reminder"}
+              onPress={scheduleAlert}
+              disabled={!scheduleTarget || automationBusy}
+              style={[styles.primaryScheduleButton, !scheduleTarget || automationBusy ? styles.primaryScheduleButtonDisabled : null]}
+            />
+            {automationArmed ? (
+              <AppButton
+                label={automationBusy ? "Working..." : "Cancel Auto Run"}
+                onPress={cancelAutoRun}
+                disabled={automationBusy}
+                variant="outline"
+                style={styles.secondaryButton}
+              />
+            ) : null}
+          </View>
+        </View>
       </AppCard>
 
-      <View style={styles.row}><InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}\u00B0F`} /><InfoCard label="Humidity" value={`${weather.main.humidity}%`} /></View>
-      <View style={styles.row}><InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}\u00B0 / ${Math.round(weather.main.temp_min)}\u00B0`} /><InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} /></View>
-      <View style={styles.row}><InfoCard label="Wind" value={`${(weather.wind?.speed ?? 0).toFixed(1)} mph`} detail={`Dir ${(weather.wind?.deg ?? 0).toFixed(0)}\u00B0 | Gust ${(weather.wind?.gust ?? 0).toFixed(1)} mph`} /><InfoCard label="Precip" value={`${getPrecipInches(weather).toFixed(2)} in`} /></View>
-      <View style={styles.row}><InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} /><InfoCard label="Visibility" value={`${((weather.visibility ?? 0) / 1609.34).toFixed(1)} mi`} /></View>
-      <View style={styles.row}><InfoCard label="Sunrise" value={formatLocalTime(weather.sys?.sunrise, weather.timezone)} /><InfoCard label="Sunset" value={formatLocalTime(weather.sys?.sunset, weather.timezone)} /></View>
-    </ScrollView>
+      <AppCard title="Current Conditions" style={styles.card} contentStyle={styles.conditionsCardContent}>
+        <Text style={styles.conditionsHint}>Live weather details for the active forecast location.</Text>
+        <View style={styles.conditionsGrid}>
+          <InfoCard label="Feels Like" value={`${Math.round(weather.main.feels_like)}\u00B0F`} />
+          <InfoCard label="Humidity" value={`${weather.main.humidity}%`} />
+          <InfoCard label="High / Low" value={`${Math.round(weather.main.temp_max)}\u00B0 / ${Math.round(weather.main.temp_min)}\u00B0`} />
+          <InfoCard label="Pressure" value={`${weather.main.pressure} hPa`} />
+          <InfoCard label="Wind" value={`${(weather.wind?.speed ?? 0).toFixed(1)} mph`} detail={`Dir ${(weather.wind?.deg ?? 0).toFixed(0)}\u00B0 | Gust ${(weather.wind?.gust ?? 0).toFixed(1)} mph`} />
+          <InfoCard label="Precip" value={`${getPrecipInches(weather).toFixed(2)} in`} />
+          <InfoCard label="Cloud Cover" value={`${weather.clouds?.all ?? 0}%`} />
+          <InfoCard label="Visibility" value={`${((weather.visibility ?? 0) / 1609.34).toFixed(1)} mi`} />
+          <InfoCard label="Sunrise" value={formatLocalTime(weather.sys?.sunrise, weather.timezone)} />
+          <InfoCard label="Sunset" value={formatLocalTime(weather.sys?.sunset, weather.timezone)} />
+        </View>
+      </AppCard>
+      </ScrollView>
+      <AppNoticeModal
+        visible={notice.visible}
+        title={notice.title}
+        message={notice.message}
+        tone={notice.tone}
+        primaryAction={notice.primaryAction ?? undefined}
+        secondaryAction={notice.secondaryAction ?? undefined}
+        onClose={closeNotice}
+      />
+    </>
   );
 }
 
@@ -715,11 +961,27 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 16, gap: 12, backgroundColor: "#f3f5f8" },
   card: {},
   eyebrow: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", color: "#63788e" },
+  eyebrowLight: { fontSize: 12, fontWeight: "800", textTransform: "uppercase", color: "#c8dcf2" },
   title: { fontSize: 24, fontWeight: "700", color: "#16324f" },
+  titleHero: { fontSize: 30, fontWeight: "800", color: "#f8fbff" },
+  supportingText: { fontSize: 13, lineHeight: 19, color: "#4f6478" },
+  weatherHeroCard: { backgroundColor: "#16324f", borderColor: "#214b74" },
+  weatherHeroContent: { gap: 14 },
+  heroTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12 },
+  heroTitleBlock: { flex: 1, gap: 4 },
   heroRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   heroText: { flex: 1 },
+  heroStatsRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", gap: 12 },
+  heroIconChip: { width: 64, height: 64, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.12)", alignItems: "center", justifyContent: "center" },
   temp: { fontSize: 40, fontWeight: "700", color: "#2c6fb7" },
+  tempHero: { fontSize: 48, fontWeight: "800", color: "#ffffff" },
   subtitle: { fontSize: 14, textTransform: "capitalize", color: "#1f3550" },
+  subtitleHero: { fontSize: 14, textTransform: "capitalize", color: "#d8e6f5" },
+  heroMetaStack: { alignItems: "flex-end", gap: 6 },
+  heroMetaLabel: { fontSize: 12, color: "#c8dcf2", fontWeight: "700" },
+  heroCallout: { marginTop: 2 },
+  heroActionsRow: { flexDirection: "row", gap: 10 },
+  heroActionButton: { flex: 1 },
   headerMetaRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
   metaText: { fontSize: 12, color: "#63788e" },
   sectionTitle: { fontSize: 17, fontWeight: "700", color: "#1f3550" },
@@ -736,40 +998,49 @@ const styles = StyleSheet.create({
   currentText: { color: "#36506a", fontSize: 14, fontWeight: "700" },
   manualLabel: { color: "#36506a", fontSize: 14, fontWeight: "700" },
   manualRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
-  manualField: { flex: 1, gap: 4 },
-  manualFieldLabel: { color: "#63788e", fontSize: 14, fontWeight: "700", textTransform: "uppercase" },
-  manualInput: { minHeight: 50, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 22, fontWeight: "700" },
-  manualButton: { minWidth: 68, minHeight: 50 },
+  manualField: { flex: 1, gap: 4, alignItems: "stretch" },
+  manualFieldLabel: { color: "#63788e", fontSize: 14, fontWeight: "700", textTransform: "uppercase", textAlign: "center" },
+  manualInput: { minHeight: 50, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 22, fontWeight: "700", textAlign: "center" },
+  manualButton: { minWidth: 96, minHeight: 50, alignSelf: "stretch" },
   applyButton: { minHeight: 40 },
   applyButtonDone: { backgroundColor: "#2c6fb7" },
   schedulePrimary: { color: "#16324f", fontSize: 16, fontWeight: "700" },
-  scheduleMeta: { color: "#4f6478", fontSize: 12, lineHeight: 17 },
+  scheduleMeta: { color: "#4f6478", fontSize: 12, lineHeight: 18 },
+  plannerSection: { gap: 8 },
+  plannerHeaderRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  plannerHeaderText: { flex: 1, gap: 2 },
+  plannerSectionLabel: { color: "#1f3550", fontSize: 13, fontWeight: "800", textTransform: "uppercase" },
+  plannerDivider: { height: 1, backgroundColor: "#e3ebf4", marginVertical: 2 },
+  plannerActionRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   lookAheadHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 },
   lookAheadTitle: { color: "#36506a", fontSize: 14, fontWeight: "700" },
   lookAheadToggle: { minHeight: 32, paddingHorizontal: 12 },
   lookAheadMenu: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   lookAheadMenuButton: { minHeight: 34, paddingHorizontal: 12 },
-  lookAheadMenuButtonActive: { backgroundColor: "#2c6fb7", borderColor: "#2c6fb7" },
+  lookAheadMenuButtonActive: { backgroundColor: "#eaf2fb", borderColor: "#2c6fb7" },
   lookAheadMenuText: { color: "#36506a", fontSize: 12, fontWeight: "700" },
-  lookAheadMenuTextActive: { color: "#ffffff" },
+  lookAheadMenuTextActive: { color: "#2c6fb7" },
   lookAheadList: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10, backgroundColor: "#f3f5f8", borderWidth: 1, borderColor: "#cfd9e4", borderRadius: 10},
-  lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#2c6fb7" },
+  lookAheadCard: { width: "48%", minHeight: 96, alignItems: "flex-start", justifyContent: "flex-start", paddingHorizontal: 10, paddingVertical: 10, backgroundColor: "#f8fbff", borderWidth: 1, borderColor: "#cfd9e4", borderRadius: 10},
+  lookAheadCardActive: { borderColor: "#2c6fb7", backgroundColor: "#eef4fb" },
   lookAheadLabel: { color: "#63788e", fontSize: 11, fontWeight: "700" },
-  lookAheadLabelActive: { color: "#ffffff" },
+  lookAheadLabelActive: { color: "#2c6fb7" },
   lookAheadTemp: { color: "#1f3550", fontSize: 18, fontWeight: "700" },
-  lookAheadTempActive: { color: "#ffffff" },
+  lookAheadTempActive: { color: "#16324f" },
   lookAheadCondition: { color: "#4f6478", fontSize: 12, textTransform: "capitalize" },
-  lookAheadConditionActive: { color: "#ffffff" },
+  lookAheadConditionActive: { color: "#35506a" },
   lookAheadMix: { color: "#2c6fb7", fontSize: 12, fontWeight: "700" },
-  lookAheadMixActive: { color: "#ffffff" },
+  lookAheadMixActive: { color: "#2c6fb7" },
   manualScheduleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   manualScheduleInput: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 16, fontWeight: "700" },
   manualScheduleButton: { minWidth: 96, minHeight: 42 },
   secondaryButton: { minHeight: 42 },
-  primaryScheduleButton: { minHeight: 42 },
+  primaryScheduleButton: { minHeight: 42, backgroundColor: "#2d8a65" },
   primaryScheduleButtonDisabled: { backgroundColor: "#9eabb8" },
-  infoCard: { flex: 1, backgroundColor: "#fff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 14, padding: 14, gap: 4 },
+  conditionsCardContent: { gap: 12 },
+  conditionsHint: { color: "#5b7288", fontSize: 13, lineHeight: 18 },
+  conditionsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  infoCard: { width: "48%", backgroundColor: "#f8fbff", borderWidth: 1, borderColor: "#dce5ef", borderRadius: 16, padding: 14, gap: 4, shadowColor: "#0f172a", shadowOpacity: 0.03, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
   infoLabel: { fontSize: 12, color: "#63788e", textTransform: "uppercase", fontWeight: "700" },
   infoValue: { fontSize: 20, color: "#1f3550", fontWeight: "700" },
   infoDetail: { color: "#4e647a", fontSize: 12 },

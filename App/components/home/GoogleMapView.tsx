@@ -1,11 +1,13 @@
-import React, { useRef, useState } from 'react';
-import { Button, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import Svg, { Circle, Defs, LinearGradient, Path as SvgPath, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getJson, postJson } from '../../lib/serverApi';
 import AppButton from '../common/AppButton';
+import AppNoticeModal from '../common/AppNoticeModal';
 
 type RectangleSelection = {
   baseStation: LatLng;
@@ -57,19 +59,95 @@ type Props = {
   brinePct: number;
 };
 
+type PlanningCacheState = {
+  drawingMode: boolean;
+  firstPoint: LatLng | null;
+  selection: RectangleSelection | null;
+  baseStation: LatLng | null;
+  plannedPath: PlannedCoordinate[];
+  plannedPathDistanceM: number;
+  coverageCells: CoverageCell[];
+  areaSubmitted: boolean;
+  message: string;
+  mapType: 'standard' | 'satellite';
+};
+
+const DEFAULT_PLANNING_MESSAGE = 'Set the base station, then outline the service area.';
+let planningCache: PlanningCacheState = {
+  drawingMode: false,
+  firstPoint: null,
+  selection: null,
+  baseStation: null,
+  plannedPath: [],
+  plannedPathDistanceM: 0,
+  coverageCells: [],
+  areaSubmitted: false,
+  message: DEFAULT_PLANNING_MESSAGE,
+  mapType: 'standard',
+};
+
+function CornerPin({ index, tone }: { index: number; tone: 'start' | 'goal' | 'edge' }) {
+  const palette = tone === 'start'
+    ? { top: '#45c486', bottom: '#2d8a65', edge: '#1f6a4d' }
+    : tone === 'goal'
+      ? { top: '#5d8fd4', bottom: '#315781', edge: '#223d5b' }
+      : { top: '#5fa8ef', bottom: '#2c6fb7', edge: '#1f548a' };
+
+  return (
+    <View style={styles.pinMarkerWrap}>
+      <Svg width={34} height={42} viewBox="0 0 34 42">
+        <Defs>
+          <LinearGradient id={`pinGradient-${tone}`} x1="0" y1="0" x2="1" y2="1">
+            <Stop offset="0" stopColor={palette.top} />
+            <Stop offset="1" stopColor={palette.bottom} />
+          </LinearGradient>
+        </Defs>
+        <SvgPath
+          d="M17 2C9.82 2 4 7.82 4 15c0 8.86 9.06 18.11 11.64 20.57a1.9 1.9 0 0 0 2.72 0C20.94 33.11 30 23.86 30 15 30 7.82 24.18 2 17 2Z"
+          fill={`url(#pinGradient-${tone})`}
+          stroke={palette.edge}
+          strokeWidth={1.4}
+        />
+        <Circle cx="17" cy="15" r="6.6" fill="#ffffff" fillOpacity="0.96" />
+      </Svg>
+      <View style={styles.pinMarkerBadge}>
+        <Text style={styles.pinMarkerBadgeText}>{index + 1}</Text>
+      </View>
+    </View>
+  );
+}
+
+function DirectionArrow({ size, color }: { size: number; color: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <SvgPath
+        d="M12 2L20 22L12 17.5L4 22L12 2Z"
+        fill={color}
+        stroke="#ffffff"
+        strokeWidth={1.2}
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
-  const [drawingMode, setDrawingMode] = useState(false);
-  const [firstPoint, setFirstPoint] = useState<LatLng | null>(null);
-  const [selection, setSelection] = useState<RectangleSelection | null>(null);
-  const [plannedPath, setPlannedPath] = useState<PlannedCoordinate[]>([]);
-  const [plannedPathDistanceM, setPlannedPathDistanceM] = useState(0);
-  const [coverageCells, setCoverageCells] = useState<CoverageCell[]>([]);
-  const [areaSubmitted, setAreaSubmitted] = useState(false);
-  const [message, setMessage] = useState('Tap Draw Area, then pick two corners.');
+  const [drawingMode, setDrawingMode] = useState(planningCache.drawingMode);
+  const [firstPoint, setFirstPoint] = useState<LatLng | null>(planningCache.firstPoint);
+  const [selection, setSelection] = useState<RectangleSelection | null>(planningCache.selection);
+  const [baseStationPoint, setBaseStationPoint] = useState<LatLng | null>(planningCache.baseStation);
+  const [placingBaseStation, setPlacingBaseStation] = useState(false);
+  const [plannedPath, setPlannedPath] = useState<PlannedCoordinate[]>(planningCache.plannedPath);
+  const [plannedPathDistanceM, setPlannedPathDistanceM] = useState(planningCache.plannedPathDistanceM);
+  const [coverageCells, setCoverageCells] = useState<CoverageCell[]>(planningCache.coverageCells);
+  const [areaSubmitted, setAreaSubmitted] = useState(planningCache.areaSubmitted);
+  const [message, setMessage] = useState(planningCache.message);
   const [busy, setBusy] = useState<string | null>(null);
-  const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>(planningCache.mapType);
+  const [locationPromptVisible, setLocationPromptVisible] = useState(false);
+  const locationPromptedRef = useRef(false);
 
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
@@ -78,12 +156,79 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     muted: '#35506a',
   };
 
+  const getLocationModule = () => {
+    try {
+      return require('expo-location');
+    } catch {
+      return null;
+    }
+  };
+
+  const centerOnCoordinate = (coordinate: LatLng, zoom = 18) => {
+    requestAnimationFrame(() => {
+      mapRef.current?.animateCamera({ center: coordinate, zoom }, { duration: 280 });
+    });
+  };
+
+  const applyBaseStationPoint = (coordinate: LatLng, nextMessage = 'Base station location saved. Now mark the work area.') => {
+    setBaseStationPoint(coordinate);
+    setPlacingBaseStation(false);
+    setMessage(nextMessage);
+    centerOnCoordinate(coordinate);
+  };
+
+  const usePhoneLocationForBaseStation = async () => {
+    const Location = getLocationModule();
+    if (!Location) {
+      setPlacingBaseStation(true);
+      setMessage('Phone location is unavailable here. Tap Mark Base Station and then tap the map.');
+      return;
+    }
+
+    setBusy('locate');
+    try {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== 'granted') {
+        setPlacingBaseStation(true);
+        setMessage('Location permission was denied. Tap Mark Base Station and choose it on the map.');
+        return;
+      }
+
+      const lastKnown = await Location.getLastKnownPositionAsync();
+      const current = lastKnown ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      applyBaseStationPoint(
+        { latitude: current.coords.latitude, longitude: current.coords.longitude },
+        'Base station set from your phone location. Now mark the work area.',
+      );
+    } catch {
+      setPlacingBaseStation(true);
+      setMessage('Could not read the phone location. Tap Mark Base Station and choose it on the map.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const resetPlanningState = () => {
     setAreaSubmitted(false);
     setPlannedPath([]);
     setPlannedPathDistanceM(0);
     setCoverageCells([]);
   };
+
+  useEffect(() => {
+    planningCache = {
+      drawingMode,
+      firstPoint,
+      selection,
+      baseStation: baseStationPoint,
+      plannedPath,
+      plannedPathDistanceM,
+      coverageCells,
+      areaSubmitted,
+      message,
+      mapType,
+    };
+  }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType]);
 
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
@@ -119,7 +264,44 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     return { widthM, heightM, areaM2: widthM * heightM };
   };
 
+  const normalizeHeadingDeg = (value: unknown) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const normalized = value % 360;
+    return normalized < 0 ? normalized + 360 : normalized;
+  };
+
+  const computeHeadingBetweenPoints = (from: LatLng | PlannedCoordinate, to: LatLng | PlannedCoordinate) => {
+    const avgLatRad = ((from.latitude + to.latitude) * Math.PI) / 360;
+    const dNorth = to.latitude - from.latitude;
+    const dEast = (to.longitude - from.longitude) * Math.cos(avgLatRad);
+    const angle = (Math.atan2(dEast, dNorth) * 180) / Math.PI;
+    return normalizeHeadingDeg(angle);
+  };
+
+  const resolveHeadingForPoint = (points: PlannedCoordinate[], index: number) => {
+    const point = points[index];
+    if (!point) return null;
+
+    const directHeading = normalizeHeadingDeg(point.headingDeg);
+    if (directHeading != null) return directHeading;
+
+    const nextPoint = points[index + 1];
+    if (nextPoint) {
+      const forwardHeading = computeHeadingBetweenPoints(point, nextPoint);
+      if (forwardHeading != null) return forwardHeading;
+    }
+
+    const previousPoint = points[index - 1];
+    if (previousPoint) {
+      return computeHeadingBetweenPoints(previousPoint, point);
+    }
+
+    return null;
+  };
+
   const buildPathArrowPoints = (points: PlannedCoordinate[]) => {
+    if (points.length < 2) return [];
+
     const arrows: PlannedCoordinate[] = [];
     const headingToleranceDeg = 12;
     const { areaM2 } = getSelectionMetrics();
@@ -127,14 +309,22 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const minSegmentLengthM = arrowSpacingM * 0.9;
     let segmentStart = 0;
 
+    const pushArrow = (candidate: PlannedCoordinate) => {
+      const lastArrow = arrows[arrows.length - 1];
+      if (!lastArrow || haversineDistanceMeters(lastArrow, candidate) >= Math.max(1, arrowSpacingM * 0.35)) {
+        arrows.push(candidate);
+      }
+    };
+
     const flushSegment = (startIndex: number, endIndex: number) => {
       if (endIndex <= startIndex) return;
 
-      const cumulativeDistances = [0];
+      const segmentDistances: number[] = [];
       let segmentLengthM = 0;
-      for (let i = startIndex + 1; i <= endIndex; i++) {
-        segmentLengthM += haversineDistanceMeters(points[i - 1], points[i]);
-        cumulativeDistances.push(segmentLengthM);
+      for (let i = startIndex; i < endIndex; i++) {
+        const legLengthM = haversineDistanceMeters(points[i], points[i + 1]);
+        segmentDistances.push(legLengthM);
+        segmentLengthM += legLengthM;
       }
       if (segmentLengthM < minSegmentLengthM) return;
 
@@ -143,36 +333,43 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
       for (let arrowIndex = 0; arrowIndex < arrowCount; arrowIndex++) {
         const targetDistance = spacing * (arrowIndex + 0.5);
-        let bestPoint: PlannedCoordinate | null = null;
-        let bestDistanceDelta = Number.POSITIVE_INFINITY;
+        let traversedM = 0;
 
-        for (let offset = 0; offset < cumulativeDistances.length; offset++) {
-          const candidate = points[startIndex + offset];
-          if (typeof candidate.headingDeg !== 'number') continue;
-          const delta = Math.abs(cumulativeDistances[offset] - targetDistance);
-          if (delta < bestDistanceDelta) {
-            bestDistanceDelta = delta;
-            bestPoint = candidate;
+        for (let offset = 0; offset < segmentDistances.length; offset++) {
+          const legLengthM = segmentDistances[offset];
+          if (legLengthM <= 0) continue;
+
+          if (traversedM + legLengthM < targetDistance) {
+            traversedM += legLengthM;
+            continue;
           }
-        }
 
-        if (bestPoint) {
-          const lastArrow = arrows[arrows.length - 1];
-          const isDuplicate = lastArrow
-            && lastArrow.latitude === bestPoint.latitude
-            && lastArrow.longitude === bestPoint.longitude;
-          if (!isDuplicate) arrows.push(bestPoint);
+          const startPoint = points[startIndex + offset];
+          const endPoint = points[startIndex + offset + 1];
+          const ratio = Math.max(0, Math.min(1, (targetDistance - traversedM) / legLengthM));
+          const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint) ?? resolveHeadingForPoint(points, startIndex + offset);
+
+          if (headingDeg == null) {
+            break;
+          }
+
+          pushArrow({
+            latitude: startPoint.latitude + ((endPoint.latitude - startPoint.latitude) * ratio),
+            longitude: startPoint.longitude + ((endPoint.longitude - startPoint.longitude) * ratio),
+            headingDeg,
+          });
+          break;
         }
       }
     };
 
     for (let i = 1; i < points.length; i++) {
-      const previousHeading = typeof points[i - 1].headingDeg === 'number' ? points[i - 1].headingDeg : null;
-      const currentHeading = typeof points[i].headingDeg === 'number' ? points[i].headingDeg : previousHeading;
+      const previousHeading = resolveHeadingForPoint(points, i - 1);
+      const currentHeading = resolveHeadingForPoint(points, i);
       if (previousHeading == null || currentHeading == null) continue;
       const headingDelta = Math.abs((((currentHeading - previousHeading) + 540) % 360) - 180);
       if (headingDelta > headingToleranceDeg) {
-        flushSegment(segmentStart, i - 1);
+        flushSegment(segmentStart, i);
         segmentStart = i;
       }
     }
@@ -197,7 +394,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
-    setSelection({ boundary, baseStation: boundary[0], goal: boundary[2] });
+    setSelection({ boundary, baseStation: baseStationPoint ?? boundary[0], goal: boundary[2] });
     resetPlanningState();
   };
 
@@ -205,7 +402,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     if (!drawingMode) return;
     if (!firstPoint) {
       setFirstPoint(corner);
-      setMessage('First corner set. Pick the opposite corner.');
+      setMessage('First corner saved. Tap the opposite corner to finish the work zone.');
       return;
     }
     const secondPoint = corner;
@@ -215,10 +412,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       { latitude: firstPoint.latitude, longitude: secondPoint.longitude },
       { latitude: secondPoint.latitude, longitude: firstPoint.longitude },
     );
-    const nextSelection = { baseStation: firstPoint, goal: secondPoint, boundary };
+    const nextSelection = { baseStation: baseStationPoint ?? firstPoint, goal: secondPoint, boundary };
     setSelection(nextSelection);
     resetPlanningState();
-    setMessage('Area set. Submit it, then plan the path.');
+    setMessage('Work zone ready. Send it to the planner, then build the route.');
     setDrawingMode(false);
     setFirstPoint(null);
     requestAnimationFrame(() => {
@@ -230,8 +427,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const handleMapPress = (event: MapPressEvent) => {
-    if (!drawingMode) return;
     const { latitude, longitude } = event.nativeEvent.coordinate;
+    if (placingBaseStation) {
+      applyBaseStationPoint({ latitude, longitude }, 'Base station pinned. Now mark the work area.');
+      return;
+    }
+    if (!drawingMode) return;
     applyCorner({ latitude, longitude });
   };
 
@@ -243,7 +444,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       const nextZoom = Math.max(2, Math.min(22, currentZoom + delta));
       mapRef.current.animateCamera({ ...camera, zoom: nextZoom }, { duration: 180 });
     } catch {
-      setMessage('Zoom failed. Try again.');
+      setMessage('Zoom adjustment failed. Try again.');
     }
   };
 
@@ -253,15 +454,21 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       pointIndex === index ? nextCoordinate : point
     ));
     updateSelectionFromBoundary(nextBoundary);
-    setMessage(`${cornerLabels[index]} updated. Submit the area again before planning.`);
+    setMessage(`${cornerLabels[index]} updated. Send the area again before building a route.`);
   };
   const toggleMapType = () => {
     setMapType((prevType) => {
-      const nextType = prevType === 'standard' ? 'hybrid' : 'standard';
-      setMessage(nextType === 'hybrid' ? 'Satellite view.' : 'Standard view.');
+      const nextType = prevType === 'standard' ? 'satellite' : 'standard';
+      setMessage(nextType === 'satellite' ? 'Satellite view enabled.' : 'Standard map view enabled.');
       return nextType;
     });
   };
+
+  useEffect(() => {
+    if (locationPromptedRef.current || baseStationPoint) return;
+    locationPromptedRef.current = true;
+    setLocationPromptVisible(true);
+  }, [baseStationPoint]);
 
   const loadCoverageGrid = async () => {
     try {
@@ -284,19 +491,24 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const submitArea = async () => {
     if (!selection) return;
+    const resolvedBaseStation = baseStationPoint ?? selection.baseStation ?? null;
+    if (!resolvedBaseStation) {
+      setMessage('Set the base station location first so the route knows where to start and return.');
+      return;
+    }
     setBusy('area');
     try {
       await postJson(serverUrl, '/api/input-area', {
-        baseStation: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
-        homePoint: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
+        baseStation: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+        homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
         boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
         cellSizeM: 2,
       });
       setAreaSubmitted(true);
       const gridLoaded = await loadCoverageGrid();
-      setMessage(gridLoaded ? 'Area submitted. You can plan the path now.' : 'Area submitted. Grid preview is unavailable right now.');
+      setMessage(gridLoaded ? 'Work area sent. You can build the route now.' : 'Work area sent, but the grid preview is unavailable right now.');
     } catch (requestError) {
-      setMessage(requestError instanceof Error ? requestError.message : 'Area submit failed.');
+      setMessage(requestError instanceof Error ? requestError.message : 'Could not send the work area.');
     } finally {
       setBusy(null);
     }
@@ -304,16 +516,22 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const planPath = async () => {
     if (!selection) return;
+    const resolvedBaseStation = baseStationPoint ?? selection.baseStation ?? null;
+    if (!resolvedBaseStation) {
+      setMessage('Set the base station location first so the route knows where to start and return.');
+      return;
+    }
     if (!areaSubmitted) {
-      setMessage('Submit the area first.');
+      setMessage('Send the area to the planner first.');
       return;
     }
     setBusy('path');
     try {
       const result = await postJson<{ ok: boolean; points: PlannedPoint[] }>(serverUrl, '/api/path/plan', {
         mode: 'coverage',
-        start: { lat: selection.baseStation.latitude, lon: selection.baseStation.longitude },
+        start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
         goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
+        homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
         coverageWidthM: 0.5,
         returnToBase: true,
         saltPct,
@@ -340,14 +558,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         });
       }
       if (saltPct === 0 && brinePct === 0) {
-        setMessage('Path ready, but warning: 0% salt and 0% brine cannot be started.');
+        setMessage('Route ready, but warning: 0% salt and 0% brine cannot be started.');
       } else {
-        setMessage(`Path ready: ${points.length} points, ${(totalDistance / 1000).toFixed(2)} km.`);
+        setMessage(`Route ready: ${points.length} points over ${(totalDistance / 1000).toFixed(2)} km.`);
       }
     } catch (requestError) {
       setPlannedPath([]);
       setPlannedPathDistanceM(0);
-      setMessage(requestError instanceof Error ? requestError.message : 'Path planning failed.');
+      setMessage(requestError instanceof Error ? requestError.message : 'Route planning failed.');
     } finally {
       setBusy(null);
     }
@@ -356,6 +574,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const { widthM, heightM, areaM2 } = getSelectionMetrics();
   const arrowSize = areaM2 > 4000 ? 22 : areaM2 > 1600 ? 18 : 14;
   const pathArrowPoints = buildPathArrowPoints(plannedPath);
+  const activeBaseStation = baseStationPoint ?? selection?.baseStation ?? null;
 
   return (
     <View style={styles.container}>
@@ -381,6 +600,18 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           rotateEnabled={false}
           pitchEnabled={false}
         >
+          {activeBaseStation ? (
+            <Marker
+              coordinate={activeBaseStation}
+              anchor={{ x: 0.5, y: 1 }}
+              title="Base station"
+              description="Autonomy starts and returns here"
+            >
+              <View style={styles.baseStationMarker}>
+                <MaterialCommunityIcons name="radio-tower" size={16} color="#ffffff" />
+              </View>
+            </Marker>
+          ) : null}
           {selection ? (
             <>
               {coverageCells.map((cell) => (
@@ -403,11 +634,16 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   key={`corner-${index}`}
                   coordinate={point}
                   draggable
-                  pinColor={index === 0 ? '#2d8a65' : index === 2 ? '#b63d3d' : '#2c6fb7'}
+                  anchor={{ x: 0.5, y: 0.5 }}
                   title={cornerLabels[index]}
                   description={'Press and hold, then drag to adjust this corner'}
                   onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
-                />
+                >
+                  <CornerPin
+                    index={index}
+                    tone={index === 0 ? 'start' : index === 2 ? 'goal' : 'edge'}
+                  />
+                </Marker>
               ))}
               {plannedPath.length > 1 ? (
                 <>
@@ -438,11 +674,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                           { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
                         ]}
                       >
-                        <MaterialCommunityIcons
-                          name="navigation"
-                          size={Math.max(12, arrowSize - 4)}
-                          color="#1f5f9f"
-                        />
+                        <DirectionArrow size={Math.max(14, arrowSize)} color="#1f5f9f" />
                       </View>
                     </Marker>
                   ))}
@@ -453,14 +685,28 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </MapView>
       </View>
 
-      <View style={[styles.zoomStack, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
-        <Button title="+" onPress={() => zoomBy(1)} />
+      <View pointerEvents="box-none" style={[styles.zoomStack, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+        <AppButton
+          label="+"
+          onPress={() => zoomBy(1)}
+          variant="outline"
+          compact
+          style={styles.zoomButton}
+          textStyle={styles.zoomButtonText}
+        />
         <View style={styles.smallGap}>
-          <Button title="-" onPress={() => zoomBy(-1)} />
+          <AppButton
+            label="−"
+            onPress={() => zoomBy(-1)}
+            variant="outline"
+            compact
+            style={styles.zoomButton}
+            textStyle={styles.zoomButtonText}
+          />
         </View>
       </View>
 
-      <View style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+      <View pointerEvents="box-none" style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
         <View style={styles.modeChipTextBlock}>
           <View style={styles.modeChipRow}>
             <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}>
@@ -479,7 +725,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         <View style={styles.modeChipActions}>
           <AppButton label={mapType === 'standard' ? 'Satellite' : 'Standard'} onPress={toggleMapType} variant="outline" style={styles.mapTypeAction}>
             <MaterialCommunityIcons
-              name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
+              name={mapType === 'standard' ? 'satellite-variant' : 'map-outline'}
               size={16}
               color="#2c6fb7"
             />
@@ -487,33 +733,91 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
-        <Text style={[styles.overlayText, { color: theme.text }]}>{message}</Text>
-        <Text style={styles.stepText}>Draw area • Submit area • Plan path</Text>
+      <View pointerEvents="box-none" style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
+        <Text style={[styles.overlayText, { color: theme.text }]} numberOfLines={2}>{message}</Text>
+
+        {activeBaseStation ? (
+          <View style={styles.baseStationSummaryRow}>
+            <View style={styles.baseStationSummaryCard}>
+              <View style={styles.baseStationSummaryIcon}>
+                <MaterialCommunityIcons name="radio-tower" size={14} color="#ffffff" />
+              </View>
+              <View style={styles.baseStationSummaryText}>
+                <Text style={styles.baseStationSummaryTitle}>Base station ready</Text>
+                <Text style={styles.baseStationSummaryMeta}>
+                  {activeBaseStation.latitude.toFixed(5)}, {activeBaseStation.longitude.toFixed(5)}
+                </Text>
+              </View>
+            </View>
+            <AppButton
+              label={placingBaseStation ? 'Tap Map' : 'Move Pin'}
+              onPress={() => {
+                setPlacingBaseStation(true);
+                setDrawingMode(false);
+                setFirstPoint(null);
+                setMessage('Tap the map to move the base station pin.');
+              }}
+              variant="outline"
+              compact
+              style={styles.summaryActionButton}
+            />
+          </View>
+        ) : (
+          <View style={styles.actionRow}>
+            <AppButton
+              label={busy === 'locate' ? 'Locating...' : 'Use My Location'}
+              onPress={() => { void usePhoneLocationForBaseStation(); }}
+              disabled={busy !== null}
+              variant="outline"
+              style={styles.secondaryAction}
+            />
+            <AppButton
+              label={placingBaseStation ? 'Tap Map For Pin' : 'Mark on Map'}
+              onPress={() => {
+                setPlacingBaseStation(true);
+                setDrawingMode(false);
+                setFirstPoint(null);
+                setMessage('Tap the map where the base station is parked.');
+              }}
+              variant="outline"
+              style={styles.secondaryAction}
+            />
+          </View>
+        )}
+
         {plannedPath.length > 1 ? (
-          <Text style={styles.pathMetaText}>Path: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Grid {Math.round(widthM)}m x {Math.round(heightM)}m</Text>
+          <Text style={styles.pathMetaText}>
+            Route: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Area {Math.round(areaM2)} m²
+          </Text>
+        ) : selection ? (
+          <Text style={styles.pathMetaText}>
+            Area: {Math.round(widthM)}m × {Math.round(heightM)}m • {Math.round(areaM2)} m²
+          </Text>
         ) : null}
+
         <View style={styles.actionRow}>
           <AppButton
-            label={drawingMode ? 'Drawing...' : 'Draw Area'}
+            label={drawingMode ? 'Marking...' : 'Outline Area'}
             onPress={() => {
               setSelection(null);
               resetPlanningState();
               setDrawingMode(true);
+              setPlacingBaseStation(false);
               setFirstPoint(null);
-              setMessage('Pick the first corner, then the opposite corner.');
+              setMessage('Pick two opposite corners to outline the service area.');
             }}
             variant="outline"
             style={styles.secondaryAction}
           />
           <AppButton
-            label="Clear"
+            label="Clear Plan"
             onPress={() => {
               setSelection(null);
               resetPlanningState();
               setFirstPoint(null);
               setDrawingMode(false);
-              setMessage('Area cleared.');
+              setPlacingBaseStation(false);
+              setMessage(baseStationPoint ? 'Service area cleared. Outline a new area when ready.' : DEFAULT_PLANNING_MESSAGE);
             }}
             variant="outline"
             style={styles.secondaryAction}
@@ -522,10 +826,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         <View style={styles.actionRow}>
           <AppButton
-            label={busy === 'area' ? 'Submitting Area...' : areaSubmitted ? 'Area Submitted' : 'Submit Area'}
+            label={busy === 'area' ? 'Saving Area...' : areaSubmitted ? 'Area Saved' : 'Save Area'}
             onPress={submitArea}
             disabled={!selection || busy !== null}
-            variant={!selection || busy !== null ? 'primary' : areaSubmitted ? 'success' : 'success'}
+            variant={!selection || busy !== null ? 'primary' : 'success'}
             style={[
               styles.statefulButton,
               styles.actionFill,
@@ -533,7 +837,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             ]}
           />
           <AppButton
-            label={busy === 'path' ? 'Planning Path...' : 'Plan Path'}
+            label={busy === 'path' ? 'Building Route...' : 'Build Route'}
             onPress={planPath}
             disabled={!selection || !areaSubmitted || busy !== null}
             variant="primary"
@@ -545,6 +849,25 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           />
         </View>
       </View>
+      <AppNoticeModal
+        visible={locationPromptVisible}
+        title="Set base station location"
+        message="Use your phone location for the base station, or tap the map to place it manually before planning the route."
+        tone="info"
+        primaryAction={{
+          label: 'Use My Location',
+          onPress: () => { void usePhoneLocationForBaseStation(); },
+        }}
+        secondaryAction={{
+          label: 'Mark on Map',
+          variant: 'outline',
+          onPress: () => {
+            setPlacingBaseStation(true);
+            setMessage('Tap the map where the base station is parked, then mark the work area.');
+          },
+        }}
+        onClose={() => setLocationPromptVisible(false)}
+      />
     </View>
   );
 }
@@ -568,9 +891,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
-    borderRadius: 12,
+    borderRadius: 16,
     paddingHorizontal: 12,
     paddingVertical: 10,
+    zIndex: 30,
+    elevation: 12,
   },
   zoomStack: {
     position: 'absolute',
@@ -581,19 +906,23 @@ const styles = StyleSheet.create({
     borderColor: '#d9e4f0',
     borderRadius: 12,
     padding: 8,
+    zIndex: 30,
+    elevation: 12,
   },
   modeChip: {
     position: 'absolute',
     left: 16,
     top: 64,
-    width: 160,
+    width: 144,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 8,
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    gap: 6,
+    zIndex: 30,
+    elevation: 12,
   },
   modeChipTextBlock: {
     gap: 3,
@@ -607,9 +936,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   mapTypeAction: {
-    minHeight: 40,
+    minHeight: 34,
     minWidth: 0,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
   },
   modeChipText: {
     fontSize: 12,
@@ -624,36 +953,127 @@ const styles = StyleSheet.create({
   smallGap: {
     marginTop: 8,
   },
+  zoomButton: {
+    minWidth: 40,
+    minHeight: 36,
+    paddingHorizontal: 0,
+  },
+  zoomButtonText: {
+    color: '#16324f',
+    fontSize: 20,
+    lineHeight: 20,
+  },
   overlayText: {
-    marginBottom: 4,
+    marginBottom: 2,
     color: '#16324f',
     fontSize: 12,
-    lineHeight: 16,
-    fontWeight: '600',
-  },
-  stepText: {
-    color: '#4f6275',
-    fontSize: 11,
-    marginBottom: 6,
-    fontWeight: '600',
+    lineHeight: 17,
+    fontWeight: '700',
   },
   actionRow: {
     flexDirection: 'row',
-    gap: 6,
-    marginTop: 6,
+    gap: 8,
+    marginTop: 8,
   },
   actionFill: {
     flex: 1,
   },
   secondaryAction: {
     flex: 1,
-    minHeight: 34,
+    minHeight: 40,
+  },
+  baseStationSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 6,
+  },
+  baseStationSummaryCard: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: '#eef4fb',
+    borderWidth: 1,
+    borderColor: '#d7e4f2',
+  },
+  baseStationSummaryIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#1f5f9f',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  baseStationSummaryText: {
+    flex: 1,
+    gap: 1,
+  },
+  baseStationSummaryTitle: {
+    color: '#16324f',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  baseStationSummaryMeta: {
+    color: '#58708a',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  summaryActionButton: {
+    minWidth: 86,
+    minHeight: 40,
   },
   pathMetaText: {
     color: '#1f5f9f',
-    fontSize: 11,
-    marginBottom: 6,
+    fontSize: 10,
+    marginTop: 6,
+    marginBottom: 1,
     fontWeight: '600',
+    lineHeight: 14,
+  },
+  pinMarkerWrap: {
+    width: 34,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+  },
+  baseStationMarker: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#16324f',
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.18,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  pinMarkerBadge: {
+    position: 'absolute',
+    top: 8,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.12,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 2,
+  },
+  pinMarkerBadgeText: {
+    color: '#16324f',
+    fontSize: 9,
+    fontWeight: '900',
   },
   pathArrow: {
     alignItems: 'center',
@@ -666,7 +1086,7 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   statefulButton: {
-    minHeight: 36,
+    minHeight: 40,
   },
   buttonReady: {
     backgroundColor: '#2d8a65',

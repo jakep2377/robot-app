@@ -69,52 +69,30 @@ async function pickFirstHealthy(urls: string[], timeoutMs: number) {
   return { success, results };
 }
 
-async function discoverBestServer(preferredUrl?: string | null) {
-  const localCandidates = uniqueUrls([
-    ...(preferredUrl ? [preferredUrl] : []),
-    ...(typeof process.env.EXPO_PUBLIC_DEFAULT_SERVER_URL === 'string' && process.env.EXPO_PUBLIC_DEFAULT_SERVER_URL.trim()
-      ? [process.env.EXPO_PUBLIC_DEFAULT_SERVER_URL.trim()]
-      : []),
-    ...LOCAL_SERVER_CANDIDATES,
-  ]).filter((url) => !url.includes('onrender.com'));
-
-  const local = await pickFirstHealthy(localCandidates, 1400);
-  if (local.success) {
-    return {
-      state: {
-        serverUrl: local.success.serverUrl,
-        mode: 'local' as const,
-        label: 'Field backend',
-        status: 'connected' as const,
-        detail: `Connected to field backend in ${local.success.latencyMs} ms`,
-      },
-      probes: local.results,
-    };
-  }
-
-  const cloud = await probeServer(DEFAULT_CLOUD_SERVER_URL, 2200);
+async function discoverBestServer() {
+  const cloud = await probeServer(DEFAULT_CLOUD_SERVER_URL, 2600);
   if (cloud.ok) {
     return {
       state: {
-        serverUrl: cloud.serverUrl,
+        serverUrl: DEFAULT_CLOUD_SERVER_URL,
         mode: 'cloud' as const,
-        label: 'Remote fallback',
-        status: 'fallback' as const,
-        detail: `Using remote backend in ${cloud.latencyMs} ms`,
+        label: 'Remote server',
+        status: 'connected' as const,
+        detail: `Connected to the hosted server in ${cloud.latencyMs} ms`,
       },
-      probes: [...local.results, cloud],
+      probes: [cloud],
     };
   }
 
   return {
-      state: {
-        serverUrl: preferredUrl ? normalizeServerUrl(preferredUrl) : DEFAULT_CLOUD_SERVER_URL,
-        mode: 'discovering' as const,
-        label: 'Backend unavailable',
-        status: 'error' as const,
-        detail: 'Could not reach a local backend or the cloud fallback.',
-      },
-    probes: [...local.results, cloud],
+    state: {
+      serverUrl: DEFAULT_CLOUD_SERVER_URL,
+      mode: 'cloud' as const,
+      label: 'Remote server offline',
+      status: 'error' as const,
+      detail: 'The hosted server could not be reached right now.',
+    },
+    probes: [cloud],
   };
 }
 
@@ -123,9 +101,9 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({
     serverUrl: DEFAULT_CLOUD_SERVER_URL,
     mode: 'discovering',
-    label: 'Finding field backend',
+    label: 'Checking server connection',
     status: 'connecting',
-    detail: 'Looking for a nearby field backend first.',
+    detail: 'Connecting to the remote server.',
   });
   const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
@@ -143,19 +121,17 @@ export default function App() {
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
 
-  const runDiscovery = async (preferredUrl?: string | null) => {
+  const runDiscovery = async () => {
     setConnectionBusy(true);
     setConnectionError(null);
     try {
-      const result = await discoverBestServer(preferredUrl);
+      const result = await discoverBestServer();
       setConnection(result.state);
-      setServerUrl(result.state.serverUrl);
-      setManualServerUrl(result.state.serverUrl);
+      setServerUrl(DEFAULT_CLOUD_SERVER_URL);
+      setManualServerUrl(DEFAULT_CLOUD_SERVER_URL);
       if (result.state.status === 'error') {
-        const failedLocal = result.probes.filter((probe) => !probe.ok).slice(0, 2);
-        if (failedLocal.length > 0) {
-          setConnectionError(failedLocal.map((probe) => `${probe.serverUrl}: ${probe.error ?? 'unreachable'}`).join('\n'));
-        }
+        const probe = result.probes[0];
+        setConnectionError(probe?.error ?? 'Unable to reach the hosted server.');
       }
     } finally {
       setConnectionBusy(false);
@@ -165,7 +141,7 @@ export default function App() {
   useEffect(() => {
     runDiscovery().catch(() => {
       setConnectionBusy(false);
-      setConnectionError('Unable to complete server discovery.');
+      setConnectionError('Unable to check the server connection.');
     });
   }, []);
 
@@ -203,12 +179,11 @@ export default function App() {
     setBaseStationSetupError(null);
     setBaseStationSetupInfo(null);
     try {
-      const normalizedBackendUrl = normalizeServerUrl(baseStationBackendUrl.trim() || serverUrl);
+      const normalizedBackendUrl = normalizeServerUrl(DEFAULT_CLOUD_SERVER_URL);
       const response = await configureBaseStationSetup(baseStationUrl, {
         ssid: baseStationWifiSsid.trim(),
         password: baseStationWifiPassword,
         backendUrl: normalizedBackendUrl,
-        boardApiKey: baseStationBoardApiKey.trim() || undefined,
       });
       setBaseStationBackendUrl(normalizedBackendUrl);
       setBaseStationSetupInfo(response.message ?? 'Wi‑Fi saved. The base station is restarting into normal mode.');
@@ -217,7 +192,7 @@ export default function App() {
         configured: true,
         savedSsid: baseStationWifiSsid.trim(),
         backendUrl: normalizedBackendUrl,
-        boardApiKeySet: Boolean(baseStationBoardApiKey.trim()),
+        boardApiKeySet: false,
       }));
     } catch (error) {
       setBaseStationSetupError(error instanceof Error ? error.message : 'Unable to save the base station setup.');
@@ -242,7 +217,7 @@ export default function App() {
     setConnection({
       serverUrl: candidate,
       mode: 'manual',
-      label: 'Manual backend',
+      label: 'Custom server',
       status: 'connected',
       detail: `Connected to ${candidate}`,
     });
@@ -256,7 +231,7 @@ export default function App() {
     setConnectionBusy(false);
 
     if (!result.ok) {
-      setConnectionError(result.error ?? 'Remote fallback is not reachable.');
+      setConnectionError(result.error ?? 'Remote server is not reachable.');
       return;
     }
 
@@ -265,9 +240,9 @@ export default function App() {
     setConnection({
       serverUrl: result.serverUrl,
       mode: 'cloud',
-      label: 'Remote fallback',
-      status: 'fallback',
-      detail: `Using remote backend in ${result.latencyMs} ms`,
+      label: 'Remote server',
+      status: 'connected',
+      detail: `Connected to the remote server in ${result.latencyMs} ms`,
     });
     setConnectionModalVisible(false);
   };
@@ -280,14 +255,16 @@ export default function App() {
         ? 'Setup AP connected'
         : 'Waiting for setup';
   const baseStationSetupDetail = baseStationSetupError
-    ? 'Join SaltRobot_Base, then tap Check Setup AP.'
+    ? 'Join SaltRobot_Base, then tap Check Setup Network.'
     : baseStationSetupInfo
-      ? 'Reconnect your phone to the normal network, then tap Find Field Backend.'
+      ? 'Reconnect your phone to the normal network, then tap Check Server Connection.'
       : baseStationSetupStatus
         ? 'The base station AP is responding. Save Wi-Fi to move it onto your normal network.'
         : 'Use this section only while your phone is connected to SaltRobot_Base.';
   const tabScreenOptions = useMemo(() => ({
     headerShown: false,
+    lazy: true,
+    freezeOnBlur: false,
     tabBarActiveTintColor: '#1f5f9f',
     tabBarInactiveTintColor: '#6b7f93',
     tabBarIconStyle: {
@@ -312,11 +289,11 @@ export default function App() {
       <StatusBar style="dark" translucent backgroundColor="transparent" />
       <View style={styles.appShell}>
         <NavigationContainer>
-          <Tab.Navigator screenOptions={tabScreenOptions}>
+          <Tab.Navigator screenOptions={tabScreenOptions} detachInactiveScreens={false}>
             <Tab.Screen
               name="Controller"
               options={{
-                tabBarLabel: 'Controller',
+                tabBarLabel: 'Operate',
                 tabBarIcon: ({ color, size }) => (
                   <MaterialCommunityIcons name="gamepad-variant" size={size + 1} color={color} />
                 ),
@@ -341,7 +318,7 @@ export default function App() {
             <Tab.Screen
               name="Area Map"
               options={{
-                tabBarLabel: 'Area Map',
+                tabBarLabel: 'Plan',
                 tabBarIcon: ({ color, size }) => (
                   <MaterialCommunityIcons name="map-marker-path" size={size + 1} color={color} style={{ transform: [{ scaleX: -1 }] }} />
                 ),
@@ -360,6 +337,7 @@ export default function App() {
             >
               {() => (
                 <WeatherScreen
+                  serverUrl={serverUrl}
                   saltPct={saltPct}
                   brinePct={brinePct}
                   setSaltPct={setSaltPct}
@@ -370,7 +348,7 @@ export default function App() {
             <Tab.Screen
               name="Help"
               options={{
-                tabBarLabel: 'Help',
+                tabBarLabel: 'Guide',
                 tabBarIcon: ({ color, size }) => (
                   <MaterialCommunityIcons name="help-circle-outline" size={size + 1} color={color} />
                 ),
@@ -386,7 +364,7 @@ export default function App() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Connection</Text>
+              <Text style={styles.modalTitle}>Server connection</Text>
               <Pressable onPress={() => setConnectionModalVisible(false)} style={styles.modalCloseButton}>
                 <Text style={styles.modalCloseText}>Close</Text>
               </Pressable>
@@ -394,40 +372,38 @@ export default function App() {
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalScrollContent}>
               <Text style={styles.modalBodyText}>
-                The app connects to the backend server only. The base station can either be reached locally by the backend or send remote status and telemetry back through the configured backend.
+                This app stays pointed at your hosted remote server so the autonomy flow is consistent everywhere.
               </Text>
-              <Text style={styles.modalStatus}>Current: {connection.label}</Text>
+              <View style={styles.modalStepRow}>
+                <View style={styles.modalStepCard}>
+                  <Text style={styles.modalStepNumber}>1</Text>
+                  <Text style={styles.modalStepText}>Check the hosted server</Text>
+                </View>
+                <View style={styles.modalStepCard}>
+                  <Text style={styles.modalStepNumber}>2</Text>
+                  <Text style={styles.modalStepText}>Set the base station Wi-Fi once</Text>
+                </View>
+                <View style={styles.modalStepCard}>
+                  <Text style={styles.modalStepNumber}>3</Text>
+                  <Text style={styles.modalStepText}>Plan and run from the same backend every time</Text>
+                </View>
+              </View>
+              <Text style={styles.modalStatus}>Current connection: {connection.label}</Text>
               <Text style={styles.modalDetail}>{connection.detail}</Text>
-
-              <Text style={styles.inputLabel}>Manual backend URL</Text>
-              <TextInput
-                style={styles.input}
-                value={manualServerUrl}
-                onChangeText={setManualServerUrl}
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="http://192.168.1.50:8080"
-                placeholderTextColor="#8aa0b7"
-              />
+              <Text style={styles.modalHintText}>Hosted server: {DEFAULT_CLOUD_SERVER_URL}</Text>
 
               {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
 
               <View style={styles.buttonStack}>
-                <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => runDiscovery(serverUrl)} disabled={connectionBusy}>
-                  <Text style={styles.actionPrimaryText}>Find Field Backend</Text>
-                </Pressable>
-                <Pressable style={styles.actionButton} onPress={saveManualServer} disabled={connectionBusy}>
-                  <Text style={styles.actionSecondaryText}>Use Manual Address</Text>
-                </Pressable>
-                <Pressable style={styles.actionButton} onPress={useCloudFallback} disabled={connectionBusy}>
-                  <Text style={styles.actionSecondaryText}>Use Remote Fallback</Text>
+                <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={() => runDiscovery()} disabled={connectionBusy}>
+                  <Text style={styles.actionPrimaryText}>Check Hosted Server</Text>
                 </Pressable>
               </View>
 
               <View style={styles.setupSection}>
-                <Text style={styles.setupTitle}>Base Station Setup</Text>
+                <Text style={styles.setupTitle}>First-time base station setup</Text>
                 <Text style={styles.modalBodyText}>
-                  Connect your phone to <Text style={styles.inlineStrong}>SaltRobot_Base</Text>, then use this section to save the Wi-Fi and backend that the base station should use automatically.
+                  Connect your phone to <Text style={styles.inlineStrong}>SaltRobot_Base</Text>, then save the normal Wi-Fi. The backend stays fixed to your hosted server automatically.
                 </Text>
 
                 <Text style={styles.inputLabel}>Setup AP address</Text>
@@ -441,7 +417,7 @@ export default function App() {
                   placeholderTextColor="#8aa0b7"
                 />
 
-                <Text style={styles.inputLabel}>Wi-Fi name</Text>
+                <Text style={styles.inputLabel}>Wi-Fi name to join</Text>
                 <TextInput
                   style={styles.input}
                   value={baseStationWifiSsid}
@@ -464,36 +440,17 @@ export default function App() {
                   placeholderTextColor="#8aa0b7"
                 />
 
-                <Text style={styles.inputLabel}>Backend URL for the base station</Text>
-                <TextInput
-                  style={styles.input}
-                  value={baseStationBackendUrl}
-                  onChangeText={setBaseStationBackendUrl}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  placeholder="https://robot-lora-server.onrender.com"
-                  placeholderTextColor="#8aa0b7"
-                />
-
-                <Text style={styles.inputLabel}>Board API key for remote bridge (optional)</Text>
-                <TextInput
-                  style={styles.input}
-                  value={baseStationBoardApiKey}
-                  onChangeText={setBaseStationBoardApiKey}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  secureTextEntry
-                  placeholder="Needed only if backend auth is enabled"
-                  placeholderTextColor="#8aa0b7"
-                />
+                <Text style={styles.inputLabel}>Backend address for the base station</Text>
+                <View style={styles.readOnlyField}>
+                  <Text style={styles.readOnlyFieldText}>{DEFAULT_CLOUD_SERVER_URL}</Text>
+                </View>
 
                 {baseStationSetupStatus ? (
                   <View style={styles.setupStatusCard}>
                     <Text style={styles.setupStatusTitle}>{baseStationSetupStage}</Text>
                     <Text style={styles.setupStatusText}>Mode: {baseStationSetupStatus.mode ?? 'unknown'} | Wi-Fi state: {baseStationSetupStatus.wifiLinkState ?? 'unknown'}</Text>
                     <Text style={styles.setupStatusText}>Saved Wi-Fi: {baseStationSetupStatus.savedSsid || 'none yet'}</Text>
-                    <Text style={styles.setupStatusText}>Backend: {baseStationSetupStatus.backendUrl || 'default'}</Text>
-                    <Text style={styles.setupStatusText}>Board key: {baseStationSetupStatus.boardApiKeySet ? 'saved' : 'not set'}</Text>
+                    <Text style={styles.setupStatusText}>Backend: {baseStationSetupStatus.backendUrl || DEFAULT_CLOUD_SERVER_URL}</Text>
                     <Text style={styles.setupStatusText}>{baseStationSetupDetail}</Text>
                   </View>
                 ) : null}
@@ -503,10 +460,10 @@ export default function App() {
 
                 <View style={styles.buttonStack}>
                   <Pressable style={[styles.actionButton, styles.actionPrimary]} onPress={inspectBaseStationSetup} disabled={baseStationSetupBusy}>
-                    <Text style={styles.actionPrimaryText}>Check Setup AP</Text>
+                    <Text style={styles.actionPrimaryText}>Check Setup Network</Text>
                   </Pressable>
                   <Pressable style={styles.actionButton} onPress={saveBaseStationSetup} disabled={baseStationSetupBusy}>
-                    <Text style={styles.actionSecondaryText}>Save Wi-Fi to Base Station</Text>
+                    <Text style={styles.actionSecondaryText}>Save Setup to Base Station</Text>
                   </Pressable>
                 </View>
               </View>
@@ -578,6 +535,47 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#64809d',
   },
+  modalHintText: {
+    marginTop: 10,
+    fontSize: 12,
+    lineHeight: 18,
+    color: '#5f7893',
+  },
+  modalStepRow: {
+    marginTop: 14,
+    gap: 10,
+  },
+  modalStepCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#dce6f0',
+    backgroundColor: '#f8fbff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modalStepNumber: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    textAlign: 'center',
+    textAlignVertical: 'center',
+    overflow: 'hidden',
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#ffffff',
+    backgroundColor: '#2f76c1',
+    lineHeight: 24,
+  },
+  modalStepText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#35506a',
+    fontWeight: '700',
+  },
   inputLabel: {
     marginTop: 18,
     marginBottom: 8,
@@ -594,6 +592,19 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#213c5a',
     backgroundColor: '#f8fbff',
+  },
+  readOnlyField: {
+    borderWidth: 1,
+    borderColor: '#d7e2ee',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: '#eef4fb',
+  },
+  readOnlyFieldText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#21466d',
   },
   errorText: {
     marginTop: 10,

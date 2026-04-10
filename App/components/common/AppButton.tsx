@@ -30,7 +30,7 @@ export default function AppButton({
     <Pressable
       onPress={onPress}
       disabled={disabled}
-      style={[
+      style={({ pressed }) => [
         styles.base,
         variant === "primary" ? styles.primary : null,
         variant === "secondary" ? styles.secondary : null,
@@ -39,6 +39,7 @@ export default function AppButton({
         variant === "success" ? styles.success : null,
         compact ? styles.compact : null,
         disabled ? styles.disabled : null,
+        pressed && !disabled ? styles.pressed : null,
         style,
       ]}
     >
@@ -76,34 +77,51 @@ export default function AppButton({
 
 const styles = StyleSheet.create({
   base: {
-    minHeight: 42,
-    borderRadius: 10,
-    paddingHorizontal: 14,
+    minHeight: 48,
+    borderRadius: 16,
+    paddingHorizontal: 16,
     flexDirection: "row",
     gap: 8,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "transparent",
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  pressed: {
+    opacity: 0.94,
+    transform: [{ scale: 0.985 }],
   },
   compact: {
-    minHeight: 40,
+    minHeight: 38,
     paddingHorizontal: 12,
   },
   primary: {
-    backgroundColor: "#2c6fb7",
+    backgroundColor: "#1f5f9f",
+    borderColor: "#184d82",
   },
   secondary: {
     backgroundColor: "#16324f",
+    borderColor: "#112a43",
   },
   success: {
     backgroundColor: "#2d8a65",
+    borderColor: "#246a50",
   },
   danger: {
     backgroundColor: "#b63d3d",
+    borderColor: "#942f2f",
   },
   outline: {
-    backgroundColor: "#fbfcfe",
+    backgroundColor: "#f7fbff",
     borderWidth: 1,
-    borderColor: "#cfd9e4",
+    borderColor: "#c7d8e8",
+    shadowOpacity: 0.03,
+    elevation: 1,
   },
   disabled: {
     backgroundColor: "#9eabb8",
@@ -111,7 +129,9 @@ const styles = StyleSheet.create({
   },
   text: {
     color: "#ffffff",
-    fontWeight: "700",
+    fontWeight: "800",
+    fontSize: 14,
+    letterSpacing: 0.2,
   },
   outlineText: {
     color: "#16324f",
