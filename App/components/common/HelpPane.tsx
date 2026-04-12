@@ -19,79 +19,72 @@ const helpSections: HelpSection[] = [
     title: "Quick Start",
     icon: "check-circle-outline",
     content: [
-      "Open Plan and tap Mark Work Area.",
-      "Pick two opposite corners, then send the area to the planner.",
-      "Build the route for the current salt and brine mix.",
-      "Switch to Operate to commit the route and start the mission.",
-      "Use manual control only for short positioning moves or recovery.",
+      "Set the base station and outline the service area.",
+      "Save the area and build the route.",
+      "Go to Operate to commit the path and start the mission.",
+      "Use manual control only for positioning or recovery.",
     ],
   },
   {
     title: "Connection",
     icon: "lan-connect",
     content: [
-      "The phone app talks to the remote server, not directly to the robot.",
-      "Use the default remote server for normal operation.",
-      "Manual server entry is only needed when support gives you a different address.",
-      "The server manages the base station and robot link for you.",
+      "The app uses the hosted server for normal operation.",
+      "The server manages the base station and robot link.",
+      "Only change the server address when you need to use a different system.",
     ],
   },
   {
     title: "System Status",
     icon: "view-dashboard-outline",
     content: [
-      "Mission, Robot, and Coverage at the top give the quick job summary.",
-      "The cards below show whether the remote server, base station, gateway, STM32, GPS, and waypoints are ready.",
-      "If the banner says Needs attention, fix those items before starting autonomy.",
-      "Alerts are placed high on the Operate screen so issues are easier to catch quickly.",
+      "Check Mission, Robot, and Coverage first.",
+      "Fix any item marked Needs attention before autonomy.",
+      "Use the alerts card for the most recent blocking issue.",
     ],
   },
   {
     title: "Plan",
     icon: "map-marker-path",
     content: [
-      "Drag any corner marker if the work zone needs a quick adjustment.",
-      "Send Area stores the lot boundary for the planner.",
-      "Build Route creates the coverage pass the robot will follow.",
-      "Start Over clears the current selection so you can redraw the job cleanly.",
+      "Place the base station, then set two area corners.",
+      "Save Area stores the lot boundary for planning.",
+      "Build Route creates the coverage path the robot will follow.",
     ],
   },
   {
     title: "Operate",
     icon: "gamepad-variant-outline",
     content: [
-      "Start with System Status and fix anything marked Needs attention.",
-      "Use Commit after a route is built on the Plan tab.",
-      "Start Auto runs the preflight review and then begins autonomy once the system is ready.",
-      "Field Notes are a simple handoff log for the next operator or support tech.",
+      "Use Commit after the route is ready.",
+      "Start Auto runs the preflight checks and begins autonomy.",
+      "Pause, Resume, Finish, and Abort stay on the Operate tab.",
     ],
   },
   {
     title: "Manual Control",
     icon: "controller-classic-outline",
     content: [
-      "Open Manual / Joystick Control from Operate whenever you need direct positioning.",
-      "Hold FWD or REV to move, and use TURN L or TURN R to pivot the robot into position.",
-      "Release any drive button to send stop, and use E-Stop immediately for unsafe motion.",
+      "Open Manual Control for short moves or recovery.",
+      "Use the thumb pad for blended turning and speed.",
+      "Release to stop, and use E-Stop for unsafe motion.",
     ],
   },
   {
     title: "Weather",
     icon: "weather-snowy",
     content: [
-      "This screen recommends a treatment mix based on current and forecast conditions.",
-      "Next 5 Days helps you choose a better service window before conditions worsen.",
-      "Create Reminder can send a phone alert ahead of the selected service time.",
+      "Review the forecast, treatment mix, and service window.",
+      "Arm a reminder or auto run when conditions call for it.",
     ],
   },
   {
     title: "Troubleshooting",
     icon: "lightbulb-on-outline",
     content: [
-      "If Start is blocked, read the readiness cards from top to bottom first.",
-      "If telemetry looks stale, verify the backend, base station, and LoRa path before retrying autonomy.",
-      "If the app reconnects after a restart, review the restored mission state before resuming work.",
-      "Use the server dashboard for deeper service checks when the phone view is not enough.",
+      "If autonomy is blocked, check connection health and GPS readiness.",
+      "If telemetry is stale, inspect the backend, base station, and LoRa path.",
+      "Use the server dashboard for deeper system checks.",
     ],
   },
 ];
@@ -109,7 +102,7 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
       <View style={styles.header}>
         <View style={styles.headerTitleRow}>
           <MaterialCommunityIcons name="help-circle-outline" size={24} color="#2c6fb7" />
-          <Text style={styles.headerTitle}>Guide & Quick Help</Text>
+          <Text style={styles.headerTitle}>Quick Guide</Text>
         </View>
         {visible === false && onClose ? (
           <AppButton label="Close" onPress={onClose} variant="outline" style={styles.closeButton} />
@@ -117,20 +110,6 @@ export default function HelpPane({ visible, onClose }: HelpPaneProps) {
       </View>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
-        <AppCard style={styles.introCard}>
-          <Text style={styles.introEyebrow}>Normal operator flow</Text>
-          <Text style={styles.introTitle}>Plan the lot, commit the route, then monitor the mission.</Text>
-          <Text style={styles.introText}>
-            Most jobs follow the same sequence, so new operators can get started with less coaching.
-          </Text>
-          <View style={styles.flowList}>
-            <View style={styles.flowChip}><Text style={styles.flowChipText}>1. Plan</Text></View>
-            <View style={styles.flowChip}><Text style={styles.flowChipText}>2. Commit</Text></View>
-            <View style={styles.flowChip}><Text style={styles.flowChipText}>3. Start</Text></View>
-            <View style={styles.flowChip}><Text style={styles.flowChipText}>4. Monitor</Text></View>
-          </View>
-        </AppCard>
-
         {helpSections.map((section, index) => (
           <AppCard key={section.title} style={styles.sectionContainer} contentStyle={styles.sectionCardContent}>
             <Pressable style={styles.sectionHeader} onPress={() => setExpandedIndex(expandedIndex === index ? null : index)}>
@@ -190,44 +169,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 16,
     paddingBottom: 8,
-  },
-  introCard: {
-    marginBottom: 12,
-    backgroundColor: "#f8fbff",
-  },
-  introEyebrow: {
-    fontSize: 12,
-    fontWeight: "800",
-    textTransform: "uppercase",
-    color: "#63788e",
-  },
-  introTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#16324f",
-  },
-  introText: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: "#35506a",
-  },
-  flowList: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  flowChip: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    backgroundColor: "#eaf2fb",
-    borderWidth: 1,
-    borderColor: "#d6e5f6",
-  },
-  flowChipText: {
-    fontSize: 12,
-    fontWeight: "800",
-    color: "#2c6fb7",
   },
   sectionContainer: {
     marginBottom: 12,

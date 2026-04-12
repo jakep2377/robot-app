@@ -280,17 +280,31 @@ const MISSION_ENDPOINTS: Record<string, string> = {
 const JOYSTICK_PAD_SIZE = 172;
 const JOYSTICK_KNOB_SIZE = 64;
 const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
-const JOYSTICK_SEND_INTERVAL_MS = 120;
-const JOYSTICK_DEAD_ZONE = 0.18;
-const JOYSTICK_COMMAND_STEP = 4;
-const JOYSTICK_RESPONSE_CURVE = 1.45;
-const JOYSTICK_STRAIGHT_LOCK_THRESHOLD = 0.18;
-const JOYSTICK_STRAIGHT_ASSIST_START = 0.28;
-const JOYSTICK_STRAIGHT_TURN_SCALE = 0.28;
-const JOYSTICK_AXIS_LOCK_MARGIN = 0.2;
-const JOYSTICK_AXIS_LOCK_BREAK = 0.34;
-const JOYSTICK_TURN_WHILE_DRIVING_SCALE = 0.16;
-const JOYSTICK_DRIVE_WHILE_TURNING_SCALE = 0.42;
+const JOYSTICK_SEND_INTERVAL_MS = 105;
+const JOYSTICK_DEAD_ZONE = 0.145;
+const JOYSTICK_COMMAND_STEP = 2;
+const JOYSTICK_RESPONSE_CURVE = 1.3;
+const JOYSTICK_TOUCH_SLOP_PX = 7;
+const JOYSTICK_STRAIGHT_LOCK_THRESHOLD = 0.16;
+const JOYSTICK_STRAIGHT_ASSIST_START = 0.3;
+const JOYSTICK_STRAIGHT_TURN_SCALE = 0.34;
+const JOYSTICK_AXIS_LOCK_MARGIN = 0.18;
+const JOYSTICK_AXIS_LOCK_BREAK = 0.3;
+const JOYSTICK_TURN_WHILE_DRIVING_SCALE = 0.22;
+const JOYSTICK_DRIVE_WHILE_TURNING_SCALE = 0.5;
+const JOYSTICK_INPUT_SMOOTHING = 0.255;
+const JOYSTICK_VISUAL_SMOOTHING = 0.38;
+const JOYSTICK_EDGE_FOLLOW_BOOST = 0.2;
+const JOYSTICK_CENTER_SETTLE = 0.065;
+const JOYSTICK_COMMAND_HYSTERESIS = 10;
+const JOYSTICK_CENTER_DAMP_ZONE = 0.3;
+const JOYSTICK_CENTER_DAMP_SCALE = 0.68;
+const JOYSTICK_MID_DAMP_ZONE = 0.52;
+const JOYSTICK_MID_DAMP_SCALE = 0.9;
+const JOYSTICK_COMMAND_MAX_STEP = 14;
+const JOYSTICK_REVERSAL_GUARD = 14;
+const MANUAL_BUTTON_INITIAL_REPEAT_MS = 220;
+const MANUAL_BUTTON_REPEAT_MS = 180;
 
 function clampJoystickAxis(value: number): number {
   return Math.max(-1, Math.min(1, value));
@@ -312,6 +326,70 @@ function applyJoystickDeadZone(value: number): number {
 function snapJoystickPercent(value: number): number {
   const snapped = Math.round(value / JOYSTICK_COMMAND_STEP) * JOYSTICK_COMMAND_STEP;
   return Math.max(-100, Math.min(100, snapped));
+}
+
+function smoothJoystickAxis(previous: number, next: number): number {
+  const blend = Math.abs(next) > Math.abs(previous) ? JOYSTICK_INPUT_SMOOTHING : JOYSTICK_INPUT_SMOOTHING * 0.78;
+  const filtered = previous + (next - previous) * blend;
+  return Math.abs(filtered) < JOYSTICK_CENTER_SETTLE ? 0 : filtered;
+}
+
+function smoothJoystickVector(
+  previous: { turn: number; drive: number },
+  next: { turn: number; drive: number },
+  baseBlend: number,
+): { turn: number; drive: number } {
+  const radius = Math.min(1, Math.hypot(next.turn, next.drive));
+  const blend = Math.min(0.78, baseBlend + radius * JOYSTICK_EDGE_FOLLOW_BOOST);
+  const turn = previous.turn + (next.turn - previous.turn) * blend;
+  const drive = previous.drive + (next.drive - previous.drive) * blend;
+  return {
+    turn: Math.abs(turn) < JOYSTICK_CENTER_SETTLE ? 0 : turn,
+    drive: Math.abs(drive) < JOYSTICK_CENTER_SETTLE ? 0 : drive,
+  };
+}
+
+function dampJoystickAxis(value: number): number {
+  const magnitude = Math.abs(value);
+  if (magnitude === 0) {
+    return 0;
+  }
+  if (magnitude < JOYSTICK_CENTER_DAMP_ZONE) {
+    return value * JOYSTICK_CENTER_DAMP_SCALE;
+  }
+  if (magnitude < JOYSTICK_MID_DAMP_ZONE) {
+    return value * JOYSTICK_MID_DAMP_SCALE;
+  }
+  return value;
+}
+
+function stabilizeJoystickPercent(previous: number, next: number): number {
+  if (next === 0) {
+    return Math.abs(previous) <= JOYSTICK_COMMAND_HYSTERESIS ? 0 : next;
+  }
+
+  if (previous === 0 && Math.abs(next) <= JOYSTICK_COMMAND_HYSTERESIS) {
+    return 0;
+  }
+
+  if (Math.sign(previous) === Math.sign(next) && Math.abs(next - previous) < JOYSTICK_COMMAND_HYSTERESIS) {
+    return previous;
+  }
+
+  return next;
+}
+
+function limitJoystickPercentChange(previous: number, next: number): number {
+  if (previous !== 0 && next !== 0 && Math.sign(previous) !== Math.sign(next) && Math.abs(next) < JOYSTICK_REVERSAL_GUARD) {
+    return 0;
+  }
+
+  const delta = next - previous;
+  if (Math.abs(delta) <= JOYSTICK_COMMAND_MAX_STEP) {
+    return next;
+  }
+
+  return previous + Math.sign(delta) * JOYSTICK_COMMAND_MAX_STEP;
 }
 
 function shapeJoystickVector(
@@ -473,6 +551,7 @@ export default function ControllerScreen({
   const [error, setError] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [pressedManualButton, setPressedManualButton] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
@@ -483,6 +562,8 @@ export default function ControllerScreen({
   const refreshInFlight = useRef(false);
   const heldManualCommand = useRef<string | null>(null);
   const heldManualTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heldManualDelayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heldManualInFlight = useRef(false);
   const joystickCommand = useRef({ drive: 0, turn: 0 });
   const joystickTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const joystickInFlight = useRef(false);
@@ -490,6 +571,8 @@ export default function ControllerScreen({
   const lastJoystickSent = useRef({ drive: 0, turn: 0 });
   const joystickKnobPosition = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const joystickAxisLock = useRef<'free' | 'drive' | 'turn'>('free');
+  const joystickFilteredInput = useRef({ turn: 0, drive: 0 });
+  const joystickVisualInput = useRef({ turn: 0, drive: 0 });
 
   const refresh = async () => {
     if (refreshInFlight.current) {
@@ -573,6 +656,9 @@ export default function ControllerScreen({
       if (heldManualTimer.current) {
         clearInterval(heldManualTimer.current);
       }
+      if (heldManualDelayTimer.current) {
+        clearTimeout(heldManualDelayTimer.current);
+      }
       if (joystickTimer.current) {
         clearInterval(joystickTimer.current);
       }
@@ -580,6 +666,10 @@ export default function ControllerScreen({
   }, []);
 
   const clearHeldManualLoop = () => {
+    if (heldManualDelayTimer.current) {
+      clearTimeout(heldManualDelayTimer.current);
+      heldManualDelayTimer.current = null;
+    }
     if (heldManualTimer.current) {
       clearInterval(heldManualTimer.current);
       heldManualTimer.current = null;
@@ -587,10 +677,31 @@ export default function ControllerScreen({
     heldManualCommand.current = null;
   };
 
+  const postHeldManualCommand = async (command: string, refreshAfter = false) => {
+    if (heldManualInFlight.current) {
+      return;
+    }
+
+    heldManualInFlight.current = true;
+    try {
+      await postText(serverUrl, "/command", command.toUpperCase());
+      setError(null);
+      if (refreshAfter) {
+        await refresh();
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : `Command failed: ${command}`);
+    } finally {
+      heldManualInFlight.current = false;
+    }
+  };
+
   const clearJoystickState = () => {
     joystickCommand.current = { drive: 0, turn: 0 };
     queuedJoystickCommand.current = null;
     joystickAxisLock.current = 'free';
+    joystickFilteredInput.current = { turn: 0, drive: 0 };
+    joystickVisualInput.current = { turn: 0, drive: 0 };
     joystickKnobPosition.stopAnimation();
     Animated.spring(joystickKnobPosition, {
       toValue: { x: 0, y: 0 },
@@ -659,17 +770,47 @@ export default function ControllerScreen({
     const rawX = locationX - JOYSTICK_PAD_SIZE / 2;
     const rawY = locationY - JOYSTICK_PAD_SIZE / 2;
     const distance = Math.hypot(rawX, rawY);
+    if (distance <= JOYSTICK_TOUCH_SLOP_PX) {
+      locationX = JOYSTICK_PAD_SIZE / 2;
+      locationY = JOYSTICK_PAD_SIZE / 2;
+    }
     const scale = distance > JOYSTICK_TRAVEL_RADIUS ? JOYSTICK_TRAVEL_RADIUS / distance : 1;
-    const x = rawX * scale;
-    const y = rawY * scale;
-    const { turn, drive, mode } = shapeJoystickVector(
-      x / JOYSTICK_TRAVEL_RADIUS,
-      (-1 * y) / JOYSTICK_TRAVEL_RADIUS,
+    const x = (locationX - JOYSTICK_PAD_SIZE / 2) * scale;
+    const y = (locationY - JOYSTICK_PAD_SIZE / 2) * scale;
+
+    const rawTurnInput = x / JOYSTICK_TRAVEL_RADIUS;
+    const rawDriveInput = (-1 * y) / JOYSTICK_TRAVEL_RADIUS;
+    const rawVector = { turn: rawTurnInput, drive: rawDriveInput };
+
+    const nextVisualInput = smoothJoystickVector(
+      joystickVisualInput.current,
+      rawVector,
+      JOYSTICK_VISUAL_SMOOTHING,
+    );
+    joystickVisualInput.current = nextVisualInput;
+
+    const nextCommandInput = {
+      turn: smoothJoystickAxis(joystickFilteredInput.current.turn, rawTurnInput),
+      drive: smoothJoystickAxis(joystickFilteredInput.current.drive, rawDriveInput),
+    };
+    joystickFilteredInput.current = nextCommandInput;
+
+    const { turn: rawTurn, drive: rawDrive, mode } = shapeJoystickVector(
+      dampJoystickAxis(nextCommandInput.turn),
+      dampJoystickAxis(nextCommandInput.drive),
       joystickAxisLock.current,
     );
     joystickAxisLock.current = mode;
-    const displayX = (turn / 100) * JOYSTICK_TRAVEL_RADIUS;
-    const displayY = (-drive / 100) * JOYSTICK_TRAVEL_RADIUS;
+    const turn = limitJoystickPercentChange(
+      joystickCommand.current.turn,
+      stabilizeJoystickPercent(joystickCommand.current.turn, rawTurn),
+    );
+    const drive = limitJoystickPercentChange(
+      joystickCommand.current.drive,
+      stabilizeJoystickPercent(joystickCommand.current.drive, rawDrive),
+    );
+    const displayX = nextVisualInput.turn * JOYSTICK_TRAVEL_RADIUS;
+    const displayY = (-nextVisualInput.drive) * JOYSTICK_TRAVEL_RADIUS;
     const active = drive !== 0 || turn !== 0;
 
     joystickKnobPosition.setValue({ x: displayX, y: displayY });
@@ -745,25 +886,33 @@ export default function ControllerScreen({
       joystickTimer.current = null;
     }
     clearJoystickState();
+    setPressedManualButton(null);
     clearHeldManualLoop();
 
+    setPressedManualButton(command);
     heldManualCommand.current = command;
-    await performCommand(command);
+    await postHeldManualCommand(command);
 
-    heldManualTimer.current = setInterval(() => {
-      if (heldManualCommand.current !== command || pendingAction) {
+    heldManualDelayTimer.current = setTimeout(() => {
+      if (heldManualCommand.current !== command) {
         return;
       }
-      void performCommand(command);
-    }, 650);
+      heldManualTimer.current = setInterval(() => {
+        if (heldManualCommand.current !== command) {
+          return;
+        }
+        void postHeldManualCommand(command);
+      }, MANUAL_BUTTON_REPEAT_MS);
+    }, MANUAL_BUTTON_INITIAL_REPEAT_MS);
   };
 
   const releaseHeldManualCommand = async () => {
+    setPressedManualButton(null);
     clearHeldManualLoop();
     if (pendingAction) {
       return;
     }
-    await performCommand("STOP");
+    await postHeldManualCommand("STOP", true);
   };
   const performAction = async (actionId: string) => {
     const endpoint = MISSION_ENDPOINTS[actionId];
@@ -916,6 +1065,84 @@ export default function ControllerScreen({
     return Array.from(groups.entries());
   }, [testMenu]);
 
+  const toFriendlyLabel = (value?: string | null, fallback = "Unknown") => {
+    if (!value) return fallback;
+    return String(value)
+      .replace(/[_-]+/g, " ")
+      .toLowerCase()
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  };
+
+  const formatMissionStateLabel = (value?: string | null) => {
+    switch (String(value ?? "").toUpperCase()) {
+      case "IDLE":
+      case "READY":
+        return "Ready";
+      case "CONFIGURING":
+      case "PLANNED":
+        return "Setup";
+      case "RUNNING":
+        return "Running";
+      case "PAUSED":
+        return "Paused";
+      case "COMPLETED":
+        return "Complete";
+      case "ABORTED":
+        return "Stopped";
+      case "ERROR":
+        return "Needs attention";
+      default:
+        return toFriendlyLabel(value);
+    }
+  };
+
+  const formatRobotStateLabel = (value?: string | null) => {
+    switch (String(value ?? "").toUpperCase()) {
+      case "IDLE":
+      case "READY":
+        return "Ready";
+      case "MANUAL":
+        return "Manual";
+      case "AUTO":
+      case "AUTONOMOUS":
+        return "Automatic";
+      case "RUNNING":
+        return "Running";
+      case "PAUSED":
+        return "Paused";
+      case "ESTOP":
+        return "Emergency stop";
+      case "SAFE_OFF":
+        return "Safe stop";
+      case "ERROR":
+      case "FAULT":
+        return "Needs attention";
+      case "OFFLINE":
+        return "Offline";
+      default:
+        return toFriendlyLabel(value);
+    }
+  };
+
+  const formatConnectionStateLabel = (value?: string | null, fallback = "Unknown") => {
+    switch (String(value ?? "").toLowerCase()) {
+      case "online":
+        return "Connected";
+      case "ready":
+        return "Ready";
+      case "degraded":
+      case "stale":
+        return "Delayed";
+      case "offline":
+        return "Offline";
+      case "unknown":
+      case "":
+        return fallback;
+      default:
+        return toFriendlyLabel(value, fallback);
+    }
+  };
+
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
   const missionState = summary?.mission?.state ?? "UNKNOWN";
   const robotOperationalState = summary?.robot?.state ?? status?.state ?? "UNKNOWN";
@@ -931,29 +1158,38 @@ export default function ControllerScreen({
   const baseStationState = connection?.baseStation?.state ?? (health?.checks?.bridge ? "online" : "degraded");
   const robotLinkState = connection?.robot?.state ?? (health?.checks?.telemetry ? "online" : "stale");
   const commandPathState = connection?.commandPath?.state ?? "unknown";
+  const missionStateLabel = formatMissionStateLabel(missionState);
+  const robotOperationalLabel = formatRobotStateLabel(robotOperationalState);
+  const overallConnectionLabel = formatConnectionStateLabel(overallConnectionState);
+  const backendStateLabel = formatConnectionStateLabel(backendState);
+  const baseStationStateLabel = formatConnectionStateLabel(baseStationState);
+  const robotLinkStateLabel = formatConnectionStateLabel(robotLinkState);
+  const commandPathStateLabel = formatConnectionStateLabel(commandPathState);
   const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
   const baseStationReachable = Boolean(connection?.baseStation?.reachable ?? (baseStationState === "online"));
   const connectionPathLabel = connectionMode === 'cloud'
     ? 'Remote server'
     : connection?.baseStation?.connectionPathLabel ?? connection?.overall?.connectionPathLabel ?? 'Server link';
   const baseStationLabel = baseStationReachable
-    ? (connection?.baseStation?.connectionPathLabel === 'Remote bridge' ? 'ONLINE (REMOTE)' : 'ONLINE')
-    : baseStationState.toUpperCase();
-  const baseStationOperationalState = connection?.baseStation?.stationState ?? connection?.baseStation?.mode ?? (baseStationReachable ? 'READY' : baseStationState.toUpperCase());
+    ? (connection?.baseStation?.connectionPathLabel === 'Remote bridge' ? 'Connected (Remote)' : 'Connected')
+    : baseStationStateLabel;
+  const baseStationOperationalState = formatConnectionStateLabel(
+    connection?.baseStation?.stationState ?? connection?.baseStation?.mode ?? (baseStationReachable ? 'ready' : baseStationState),
+  );
   const baseStationTransportLabel = [connection?.baseStation?.wifiLinkState, connection?.baseStation?.loraLinkState]
     .filter((value): value is string => Boolean(value))
-    .map((value) => value.toUpperCase())
+    .map((value) => toFriendlyLabel(value))
     .join(' • ');
   const gatewayState = connection?.gateway?.state ?? (connection?.baseStation?.loraLinkState ? String(connection.baseStation.loraLinkState).toLowerCase() : 'unknown');
   const gatewayWorking = Boolean(connection?.gateway?.working ?? connection?.gateway?.reachable ?? (gatewayState === 'online'));
   const gatewayReason = connection?.gateway?.reason ?? null;
   const gatewayLabel = [gatewayState, connection?.gateway?.linkState, connection?.gateway?.evidence]
     .filter((value): value is string => Boolean(value))
-    .map((value) => value.toUpperCase().replace(/-/g, ' '))
+    .map((value) => toFriendlyLabel(value))
     .join(' • ');
   const stm32TelemetryAgeMs = summary?.robot?.ageMs ?? null;
   const stm32Online = Boolean(summary?.robot && !summary?.robot?.stale && robotLinkState === 'online');
-  const stm32StateLabel = stm32Online ? 'ONLINE' : (summary?.robot ? 'STALE' : 'OFFLINE');
+  const stm32StateLabel = stm32Online ? 'Connected' : (summary?.robot ? 'Delayed' : 'Offline');
   const stm32LastSeenLabel = typeof stm32TelemetryAgeMs === 'number'
     ? (stm32TelemetryAgeMs < 1000
         ? `${stm32TelemetryAgeMs} ms ago`
@@ -968,17 +1204,17 @@ export default function ControllerScreen({
   const restoredAt = health?.persistence?.restoredAt ?? null;
   const showRecoveryBanner = Boolean(restoredAt && missionState !== "IDLE");
   const summaryItems = [
-    { label: "Mission", value: missionState, detail: "Current job" },
-    { label: "Robot", value: robotOperationalState, detail: robotLinkState === "online" ? "Telemetry live" : "Telemetry needs attention" },
-    { label: "Coverage", value: `${coveragePct.toFixed(1)}%`, detail: "Mission progress" },
+    { label: "Mission", value: missionStateLabel, detail: "Current status" },
+    { label: "Robot", value: robotOperationalLabel, detail: robotLinkState === "online" ? "Telemetry live" : "Telemetry needs attention" },
+    { label: "Coverage", value: `${coveragePct.toFixed(1)}%`, detail: "Progress" },
   ];
   const systemCheckItems = [
-    { label: "Remote Server", value: backendState.toUpperCase(), detail: connectionPathLabel, good: backendState === "online" },
+    { label: "Remote Server", value: backendStateLabel, detail: connectionPathLabel, good: backendState === "online" },
     { label: "Base Station", value: baseStationOperationalState, detail: baseStationTransportLabel || "Link status", good: baseStationReachable },
-    { label: "Gateway", value: gatewayLabel || gatewayState.toUpperCase(), detail: gatewayReason ?? "LoRa bridge", good: gatewayWorking },
+    { label: "Gateway", value: gatewayLabel || formatConnectionStateLabel(gatewayState), detail: gatewayReason ?? "LoRa bridge", good: gatewayWorking },
     { label: "STM32", value: stm32StateLabel, detail: stm32LastSeenLabel, good: stm32Online },
     { label: "GPS", value: gpsReady ? "Ready" : "Needs attention", detail: gpsReady ? "Autonomy ready" : "Wait for lock", good: gpsReady },
-    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", detail: commandPathState.toUpperCase(), good: waypointsCommitted },
+    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", detail: commandPathStateLabel, good: waypointsCommitted },
   ];
   const attentionItems = systemCheckItems
     .filter((item) => item.good === false)
@@ -1042,7 +1278,7 @@ export default function ControllerScreen({
       `Marked ${new Date(markedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
     ];
     if (spot?.robot?.state) {
-      parts.push(`Robot ${spot?.robot?.state}`);
+      parts.push(`Status ${formatRobotStateLabel(spot?.robot?.state)}`);
     }
     if (spot?.robot?.gpsFix === true) {
       parts.push("GPS fix");
@@ -1066,10 +1302,10 @@ export default function ControllerScreen({
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
         </View>
         <View style={[styles.statusPill, styles.statusPillMission]}>
-          <Text style={styles.statusPillText}>{robotOperationalState}</Text>
+          <Text style={styles.statusPillText}>{robotOperationalLabel}</Text>
         </View>
         <View style={[styles.statusPill, connectionPillStyle]}>
-          <Text style={styles.statusPillText}>{overallConnectionState.toUpperCase()}</Text>
+          <Text style={styles.statusPillText}>{overallConnectionLabel}</Text>
         </View>
         <View style={[styles.statusPill, hasCriticalAlert ? styles.statusPillCritical : styles.statusPillOk]}>
           <Text style={styles.statusPillText}>{hasCriticalAlert ? "Critical Alert" : "No Critical Alerts"}</Text>
@@ -1140,13 +1376,13 @@ export default function ControllerScreen({
         </View>
 
         <Text style={[styles.metaText, { color: theme.muted }]}> 
-          Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"} | Status {status?.last_cmd_status ?? connection?.commandPath?.lastCommandStatus ?? "unknown"} | Queue {connection?.baseStation?.queueDepth ?? status?.queue_depth ?? 0}
+          Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"} | Path {commandPathStateLabel} | Queue {connection?.baseStation?.queueDepth ?? status?.queue_depth ?? 0}
         </Text>
         <Text style={[styles.metaText, { color: theme.muted }]}> 
           Base link {baseStationLabel}{baseStationTransportLabel ? ` • ${baseStationTransportLabel}` : ''}
         </Text>
         <Text style={[styles.metaText, { color: theme.muted }]}> 
-          Gateway {gatewayLabel || gatewayState.toUpperCase()}{gatewayReason ? ` • ${gatewayReason}` : ''}
+          Gateway {gatewayLabel || formatConnectionStateLabel(gatewayState)}{gatewayReason ? ` • ${gatewayReason}` : ''}
         </Text>
         <Text style={[styles.metaText, { color: theme.muted }]}> 
           STM32 {stm32StateLabel} • Last seen {stm32LastSeenLabel}
@@ -1208,8 +1444,8 @@ export default function ControllerScreen({
 
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Mission Controls</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Commit the route, then use Start Auto to run the preflight review and begin autonomy.</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Run Controls</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Commit the route, then use Start Auto to review checks and begin the run.</Text>
         <View style={styles.missionActionGrid}>
           <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
           <ActionButton label="Start Auto" onPress={openPreflight} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
@@ -1225,7 +1461,7 @@ export default function ControllerScreen({
           <ActionButton label="Reset" onPress={() => performAction("command-reset")} disabled={!allowedAction("command-reset")?.enabled} busy={pendingAction === "command-reset"} />
         </View>
 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Override</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Control</Text>
         <AppButton label="Open Manual Control" onPress={() => setManualControlVisible(true)} style={styles.manualLauncher} />
       </AppCard>
 
@@ -1250,7 +1486,7 @@ export default function ControllerScreen({
         <Pressable style={styles.serviceToolsHeader} onPress={() => setServiceToolsVisible((current) => !current)}>
           <View style={styles.serviceToolsHeaderText}>
             <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Service Tools</Text>
-            <Text style={[styles.metaText, { color: theme.muted }]}>Advanced checks and command history for service work.</Text>
+            <Text style={[styles.metaText, { color: theme.muted }]}>Advanced checks and recent command history when needed.</Text>
           </View>
           <Text style={[styles.connectionChevron, { color: theme.muted }]}>{serviceToolsVisible ? 'Hide' : 'Show'}</Text>
         </Pressable>
@@ -1326,7 +1562,7 @@ export default function ControllerScreen({
         ) : null}
       </AppCard>
 
-            <Text style={[styles.metaText, { color: theme.muted }]}>Indoor demo tools are kept here for service use.</Text>
+            <Text style={[styles.metaText, { color: theme.muted }]}>Indoor demo tools are kept here for setup and testing.</Text>
             {groupedTestMenu.length ? groupedTestMenu.map(([groupName, actions]) => (
               <View key={groupName} style={styles.opsGroup}>
                 <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>{groupName}</Text>
@@ -1408,13 +1644,13 @@ export default function ControllerScreen({
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Field Notes</Text>
-        <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for handoff or customer follow-up.</Text>
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Notes</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Short notes for follow-up or record keeping.</Text>
         <TextInput
           style={[styles.input, styles.noteInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
           value={noteText}
           onChangeText={setNoteText}
-          placeholder="Add a handoff note for the next operator"
+          placeholder="Add a note for the next update"
           placeholderTextColor={theme.muted}
           multiline
         />
@@ -1504,15 +1740,15 @@ export default function ControllerScreen({
             <View style={styles.modalHeader}>
               <View style={styles.modalHeaderText}>
                 <Text style={styles.modalTitle}>Manual / Joystick Control</Text>
-                <Text style={styles.modalSubtitle}>Use the thumb pad for smoother driving, or hold the buttons for fixed moves.</Text>
+                <Text style={styles.modalSubtitle}>Use the thumb pad for finer low-speed control, or hold the buttons for fixed moves.</Text>
               </View>
               <Pressable style={styles.modalCloseButton} onPress={() => { void releaseJoystickDrive(false); void releaseHeldManualCommand(); setManualControlVisible(false); }}>
                 <Text style={styles.modalCloseButtonText}>Close</Text>
               </Pressable>
             </View>
 
-            <Text style={styles.modalStatusText}>Mission {missionState} | Robot {summary?.robot?.state ?? status?.state ?? "UNKNOWN"} | Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
-            <Text style={styles.manualHintText}>Slide inside the thumb pad to blend speed and turning together; release anywhere to stop.</Text>
+            <Text style={styles.modalStatusText}>Mission {missionStateLabel} | Robot {formatRobotStateLabel(summary?.robot?.state ?? status?.state ?? "UNKNOWN")} | Cmd {status?.last_cmd ?? summary?.lora?.lastCmd ?? "--"}</Text>
+            <Text style={styles.manualHintText}>Slide from center for smoother steering and slower corrections; release anywhere to stop.</Text>
 
             <View style={styles.manualDrivePanel}>
               <Text style={styles.manualMiniLabel}>Thumb pad</Text>
@@ -1533,22 +1769,53 @@ export default function ControllerScreen({
 
             <View style={styles.dpad}>
               <Text style={styles.manualMiniLabel}>Quick buttons</Text>
-              <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("FORWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-                <Text style={styles.commandText}>{pendingAction === "FORWARD" ? "FWD..." : "FWD"}</Text>
+              <Pressable
+                style={[styles.commandButton, pressedManualButton === "FORWARD" ? styles.commandButtonActive : null]}
+                onPressIn={() => { void beginHeldManualCommand("FORWARD"); }}
+                onPressOut={() => { void releaseHeldManualCommand(); }}
+              >
+                <Text style={[styles.commandText, pressedManualButton === "FORWARD" ? styles.commandTextActive : null]}>
+                  {pressedManualButton === "FORWARD" || pendingAction === "FORWARD" ? "FWD..." : "FWD"}
+                </Text>
               </Pressable>
               <View style={styles.row}>
-                <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("LEFT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-                  <Text style={styles.commandText}>{pendingAction === "LEFT" ? "TURN L..." : "TURN L"}</Text>
+                <Pressable
+                  style={[styles.commandButton, pressedManualButton === "LEFT" ? styles.commandButtonActive : null]}
+                  onPressIn={() => { void beginHeldManualCommand("LEFT"); }}
+                  onPressOut={() => { void releaseHeldManualCommand(); }}
+                >
+                  <Text style={[styles.commandText, pressedManualButton === "LEFT" ? styles.commandTextActive : null]}>
+                    {pressedManualButton === "LEFT" || pendingAction === "LEFT" ? "TURN L..." : "TURN L"}
+                  </Text>
                 </Pressable>
-                <Pressable style={[styles.commandButton, styles.stopButton]} onPress={() => performCommand("STOP")}>
-                  <Text style={styles.commandText}>{pendingAction === "STOP" ? "STOP..." : "STOP"}</Text>
+                <Pressable
+                  style={[styles.commandButton, styles.stopButton, pressedManualButton === "STOP" ? styles.stopButtonActive : null]}
+                  onPressIn={() => setPressedManualButton("STOP")}
+                  onPressOut={() => setPressedManualButton(null)}
+                  onPress={() => performCommand("STOP")}
+                >
+                  <Text style={[styles.commandText, pressedManualButton === "STOP" ? styles.commandTextActive : null]}>
+                    {pressedManualButton === "STOP" || pendingAction === "STOP" ? "STOP..." : "STOP"}
+                  </Text>
                 </Pressable>
-                <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("RIGHT"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-                  <Text style={styles.commandText}>{pendingAction === "RIGHT" ? "TURN R..." : "TURN R"}</Text>
+                <Pressable
+                  style={[styles.commandButton, pressedManualButton === "RIGHT" ? styles.commandButtonActive : null]}
+                  onPressIn={() => { void beginHeldManualCommand("RIGHT"); }}
+                  onPressOut={() => { void releaseHeldManualCommand(); }}
+                >
+                  <Text style={[styles.commandText, pressedManualButton === "RIGHT" ? styles.commandTextActive : null]}>
+                    {pressedManualButton === "RIGHT" || pendingAction === "RIGHT" ? "TURN R..." : "TURN R"}
+                  </Text>
                 </Pressable>
               </View>
-              <Pressable style={styles.commandButton} onPressIn={() => { void beginHeldManualCommand("BACKWARD"); }} onPressOut={() => { void releaseHeldManualCommand(); }}>
-                <Text style={styles.commandText}>{pendingAction === "BACKWARD" ? "REV..." : "REV"}</Text>
+              <Pressable
+                style={[styles.commandButton, pressedManualButton === "BACKWARD" ? styles.commandButtonActive : null]}
+                onPressIn={() => { void beginHeldManualCommand("BACKWARD"); }}
+                onPressOut={() => { void releaseHeldManualCommand(); }}
+              >
+                <Text style={[styles.commandText, pressedManualButton === "BACKWARD" ? styles.commandTextActive : null]}>
+                  {pressedManualButton === "BACKWARD" || pendingAction === "BACKWARD" ? "REV..." : "REV"}
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -1958,14 +2225,31 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 22,
     paddingVertical: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.2)",
+  },
+  commandButtonActive: {
+    backgroundColor: "#1f5a97",
+    transform: [{ scale: 0.97 }],
+    shadowColor: "#14324f",
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   stopButton: {
     backgroundColor: "#b63d3d",
+  },
+  stopButtonActive: {
+    backgroundColor: "#9f2f2f",
   },
   commandText: {
     color: "#ffffff",
     fontSize: 16,
     fontWeight: "700",
+  },
+  commandTextActive: {
+    color: "#f5fbff",
   },
   actionGrid: {
     flexDirection: "row",

@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import MapView, { LatLng, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Circle as MapCircle, LatLng, LongPressEvent, MapPressEvent, Marker, Polygon, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import Svg, { Circle, Defs, LinearGradient, Path as SvgPath, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { getJson, postJson } from '../../lib/serverApi';
+import { getJson, postJson, toWebSocketUrl } from '../../lib/serverApi';
 import AppButton from '../common/AppButton';
 import AppNoticeModal from '../common/AppNoticeModal';
 
@@ -53,6 +53,45 @@ type CoverageResponse = {
   };
 };
 
+type LatLonPayload = {
+  lat?: number | null;
+  lon?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  headingDeg?: number | null;
+  state?: string | null;
+  timestampMs?: number | null;
+};
+
+type PlannerPublicState = {
+  baseStation?: LatLonPayload | null;
+  remoteBaseStation?: LatLonPayload | null;
+  homePoint?: LatLonPayload | null;
+  boundary?: LatLonPayload[] | null;
+  robot?: LatLonPayload | null;
+  trail?: LatLonPayload[] | null;
+  lastPath?: PlannedPoint[] | null;
+};
+
+type PlannerStateResponse = {
+  ok: boolean;
+  state?: PlannerPublicState | null;
+};
+
+type PlannerSocketMessage = {
+  event?: string;
+  payload?: {
+    baseStation?: LatLonPayload | null;
+    remoteBaseStation?: LatLonPayload | null;
+    homePoint?: LatLonPayload | null;
+    boundary?: LatLonPayload[] | null;
+    robot?: LatLonPayload | null;
+    trail?: LatLonPayload[] | null;
+    points?: PlannedPoint[] | null;
+  } | null;
+  at?: number;
+};
+
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -70,9 +109,51 @@ type PlanningCacheState = {
   areaSubmitted: boolean;
   message: string;
   mapType: 'standard' | 'satellite';
+  robotPoint: LatLng | null;
+  robotTrail: LatLng[];
+};
+
+const DEFAULT_MAP_CENTER: LatLng = {
+  latitude: 41.0731,
+  longitude: -81.5171,
 };
 
 const DEFAULT_PLANNING_MESSAGE = 'Set the base station, then outline the service area.';
+
+function normalizeHeadingDeg(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const normalized = value % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function toLatLngPoint(point: unknown): LatLng | null {
+  if (!point || typeof point !== 'object') return null;
+  const candidate = point as LatLonPayload;
+  const latitude = Number(candidate.lat ?? candidate.latitude);
+  const longitude = Number(candidate.lon ?? candidate.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return { latitude, longitude };
+}
+
+function toLatLngPoints(points: unknown): LatLng[] {
+  if (!Array.isArray(points)) return [];
+  return points.map((point) => toLatLngPoint(point)).filter((point): point is LatLng => Boolean(point));
+}
+
+function toPlannedCoordinates(points: unknown): PlannedCoordinate[] {
+  if (!Array.isArray(points)) return [];
+  return points.reduce<PlannedCoordinate[]>((coordinates, point) => {
+    const coordinate = toLatLngPoint(point);
+    if (!coordinate) return coordinates;
+    coordinates.push({
+      latitude: coordinate.latitude,
+      longitude: coordinate.longitude,
+      headingDeg: normalizeHeadingDeg((point as PlannedPoint)?.headingDeg ?? null),
+    });
+    return coordinates;
+  }, []);
+}
+
 let planningCache: PlanningCacheState = {
   drawingMode: false,
   firstPoint: null,
@@ -84,18 +165,20 @@ let planningCache: PlanningCacheState = {
   areaSubmitted: false,
   message: DEFAULT_PLANNING_MESSAGE,
   mapType: 'standard',
+  robotPoint: null,
+  robotTrail: [],
 };
 
-function CornerPin({ index, tone }: { index: number; tone: 'start' | 'goal' | 'edge' }) {
+function CornerPin({ tone }: { tone: 'start' | 'goal' | 'edge' }) {
   const palette = tone === 'start'
     ? { top: '#45c486', bottom: '#2d8a65', edge: '#1f6a4d' }
     : tone === 'goal'
-      ? { top: '#5d8fd4', bottom: '#315781', edge: '#223d5b' }
-      : { top: '#5fa8ef', bottom: '#2c6fb7', edge: '#1f548a' };
+      ? { top: '#ef6a6a', bottom: '#c63d3d', edge: '#8f2424' }
+      : { top: '#8b78ff', bottom: '#5b47c9', edge: '#43349a' };
 
   return (
     <View style={styles.pinMarkerWrap}>
-      <Svg width={34} height={42} viewBox="0 0 34 42">
+      <Svg width={34} height={46} viewBox="0 0 34 46">
         <Defs>
           <LinearGradient id={`pinGradient-${tone}`} x1="0" y1="0" x2="1" y2="1">
             <Stop offset="0" stopColor={palette.top} />
@@ -103,31 +186,47 @@ function CornerPin({ index, tone }: { index: number; tone: 'start' | 'goal' | 'e
           </LinearGradient>
         </Defs>
         <SvgPath
-          d="M17 2C9.82 2 4 7.82 4 15c0 8.86 9.06 18.11 11.64 20.57a1.9 1.9 0 0 0 2.72 0C20.94 33.11 30 23.86 30 15 30 7.82 24.18 2 17 2Z"
+          d="M17 2C9.82 2 4 7.82 4 15c0 8.52 7.86 17.92 11.07 22.04.96 1.23 2.83 1.23 3.79 0C22.14 32.92 30 23.52 30 15 30 7.82 24.18 2 17 2Z"
           fill={`url(#pinGradient-${tone})`}
           stroke={palette.edge}
-          strokeWidth={1.4}
+          strokeWidth={1.2}
         />
-        <Circle cx="17" cy="15" r="6.6" fill="#ffffff" fillOpacity="0.96" />
+        <Circle cx="17" cy="15" r="6.2" fill="#ffffff" fillOpacity="0.96" />
       </Svg>
-      <View style={styles.pinMarkerBadge}>
-        <Text style={styles.pinMarkerBadgeText}>{index + 1}</Text>
-      </View>
     </View>
   );
 }
 
 function DirectionArrow({ size, color }: { size: number; color: string }) {
+  const outlineSize = size;
+  const fillSize = Math.max(12, size - 5);
+  const outlineOffsets = [
+    { x: -1.4, y: 0 },
+    { x: 1.4, y: 0 },
+    { x: 0, y: -1.4 },
+    { x: 0, y: 1.4 },
+    { x: -1, y: -1 },
+    { x: 1, y: -1 },
+    { x: -1, y: 1 },
+    { x: 1, y: 1 },
+  ];
+
   return (
-    <Svg width={size} height={size} viewBox="0 0 24 24">
-      <SvgPath
-        d="M12 2L20 22L12 17.5L4 22L12 2Z"
-        fill={color}
-        stroke="#ffffff"
-        strokeWidth={1.2}
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <View style={styles.pathArrowIcon}>
+      {outlineOffsets.map((offset, index) => (
+        <MaterialCommunityIcons
+          key={`arrow-outline-${index}`}
+          name="navigation"
+          size={outlineSize}
+          color="#ffffff"
+          style={[
+            styles.pathArrowOutline,
+            { transform: [{ translateX: offset.x }, { translateY: offset.y }] },
+          ]}
+        />
+      ))}
+      <MaterialCommunityIcons name="navigation" size={fillSize} color={color} style={styles.pathArrowFill} />
+    </View>
   );
 }
 
@@ -144,10 +243,18 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [coverageCells, setCoverageCells] = useState<CoverageCell[]>(planningCache.coverageCells);
   const [areaSubmitted, setAreaSubmitted] = useState(planningCache.areaSubmitted);
   const [message, setMessage] = useState(planningCache.message);
+  const [robotPoint, setRobotPoint] = useState<LatLng | null>(planningCache.robotPoint);
+  const [robotTrail, setRobotTrail] = useState<LatLng[]>(planningCache.robotTrail);
   const [busy, setBusy] = useState<string | null>(null);
   const [mapType, setMapType] = useState<'standard' | 'satellite'>(planningCache.mapType);
+  const [mapCenter, setMapCenter] = useState<LatLng>(planningCache.baseStation ?? DEFAULT_MAP_CENTER);
+  const [mapSpan, setMapSpan] = useState({ latitudeDelta: 0.01, longitudeDelta: 0.01 });
   const [locationPromptVisible, setLocationPromptVisible] = useState(false);
+  const [plannerReady, setPlannerReady] = useState(false);
+  const [baseStationControlsVisible, setBaseStationControlsVisible] = useState(false);
   const locationPromptedRef = useRef(false);
+  const coverageRefreshAtRef = useRef(0);
+  const coverageRequestRef = useRef<Promise<boolean> | null>(null);
 
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
@@ -170,10 +277,34 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     });
   };
 
-  const applyBaseStationPoint = (coordinate: LatLng, nextMessage = 'Base station location saved. Now mark the work area.') => {
+  const fitMapToCoordinates = (coordinates: LatLng[], padding = { top: 96, right: 88, bottom: 196, left: 88 }) => {
+    if (coordinates.length === 0) return;
+    if (coordinates.length === 1) {
+      centerOnCoordinate(coordinates[0]);
+      return;
+    }
+    requestAnimationFrame(() => {
+      mapRef.current?.fitToCoordinates(coordinates, {
+        edgePadding: padding,
+        animated: true,
+      });
+    });
+  };
+
+  const applyBaseStationPoint = (coordinate: LatLng, nextMessage?: string) => {
     setBaseStationPoint(coordinate);
+    setSelection((current) => (current ? { ...current, baseStation: coordinate } : current));
     setPlacingBaseStation(false);
-    setMessage(nextMessage);
+    setBaseStationControlsVisible(false);
+    if (!selection) {
+      setDrawingMode(true);
+      setFirstPoint(null);
+    }
+    setMessage(
+      nextMessage ?? (selection
+        ? 'Base station updated. You can save the area and build the route when ready.'
+        : 'Base station pinned. Now tap the first corner on the map to start the service area.'),
+    );
     centerOnCoordinate(coordinate);
   };
 
@@ -181,7 +312,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const Location = getLocationModule();
     if (!Location) {
       setPlacingBaseStation(true);
-      setMessage('Phone location is unavailable here. Tap Mark Base Station and then tap the map.');
+      setMessage('Phone location is unavailable here. Tap the map to place the base station manually.');
       return;
     }
 
@@ -190,7 +321,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== 'granted') {
         setPlacingBaseStation(true);
-        setMessage('Location permission was denied. Tap Mark Base Station and choose it on the map.');
+        setMessage('Location permission was denied. Tap the map to place the base station manually.');
         return;
       }
 
@@ -198,11 +329,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       const current = lastKnown ?? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       applyBaseStationPoint(
         { latitude: current.coords.latitude, longitude: current.coords.longitude },
-        'Base station set from your phone location. Now mark the work area.',
+        'Base station set from your phone location. Now tap the first corner on the map to start the service area.',
       );
     } catch {
       setPlacingBaseStation(true);
-      setMessage('Could not read the phone location. Tap Mark Base Station and choose it on the map.');
+      setMessage('Could not read the phone location. Tap the map to place the base station manually.');
     } finally {
       setBusy(null);
     }
@@ -227,8 +358,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       areaSubmitted,
       message,
       mapType,
+      robotPoint,
+      robotTrail,
     };
-  }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType]);
+  }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType, robotPoint, robotTrail]);
 
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
@@ -255,19 +388,42 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const getSelectionMetrics = () => {
     if (!selection) return { widthM: 0, heightM: 0, areaM2: 0 };
-    const widthA = haversineDistanceMeters(selection.boundary[0], selection.boundary[1]);
-    const widthB = haversineDistanceMeters(selection.boundary[2], selection.boundary[3]);
-    const heightA = haversineDistanceMeters(selection.boundary[1], selection.boundary[2]);
-    const heightB = haversineDistanceMeters(selection.boundary[3], selection.boundary[0]);
-    const widthM = (widthA + widthB) / 2;
-    const heightM = (heightA + heightB) / 2;
-    return { widthM, heightM, areaM2: widthM * heightM };
+    let minLat = selection.boundary[0]?.latitude ?? 0;
+    let maxLat = minLat;
+    let minLon = selection.boundary[0]?.longitude ?? 0;
+    let maxLon = minLon;
+    for (const point of selection.boundary) {
+      minLat = Math.min(minLat, point.latitude);
+      maxLat = Math.max(maxLat, point.latitude);
+      minLon = Math.min(minLon, point.longitude);
+      maxLon = Math.max(maxLon, point.longitude);
+    }
+    const widthM = haversineDistanceMeters(
+      { latitude: minLat, longitude: minLon },
+      { latitude: minLat, longitude: maxLon },
+    );
+    const heightM = haversineDistanceMeters(
+      { latitude: minLat, longitude: minLon },
+      { latitude: maxLat, longitude: minLon },
+    );
+    let areaAccumulator = 0;
+    for (let i = 0; i < selection.boundary.length; i++) {
+      const current = selection.boundary[i];
+      const next = selection.boundary[(i + 1) % selection.boundary.length];
+      areaAccumulator += (current.longitude * next.latitude) - (next.longitude * current.latitude);
+    }
+    const areaM2 = Math.abs(areaAccumulator) * 0.5 * 111_320 * 111_320 * Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
+    return { widthM, heightM, areaM2 };
   };
 
-  const normalizeHeadingDeg = (value: unknown) => {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-    const normalized = value % 360;
-    return normalized < 0 ? normalized + 360 : normalized;
+  const resolvePlanningCellSizeM = () => {
+    const { widthM, heightM } = getSelectionMetrics();
+    const narrowSideM = Math.min(widthM, heightM);
+
+    if (narrowSideM > 0 && narrowSideM <= 4) return 0.5;
+    if (narrowSideM > 0 && narrowSideM <= 8) return 0.75;
+    if (narrowSideM > 0 && narrowSideM <= 14) return 1.0;
+    return 2.0;
   };
 
   const computeHeadingBetweenPoints = (from: LatLng | PlannedCoordinate, to: LatLng | PlannedCoordinate) => {
@@ -278,103 +434,27 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     return normalizeHeadingDeg(angle);
   };
 
-  const resolveHeadingForPoint = (points: PlannedCoordinate[], index: number) => {
-    const point = points[index];
-    if (!point) return null;
-
-    const directHeading = normalizeHeadingDeg(point.headingDeg);
-    if (directHeading != null) return directHeading;
-
-    const nextPoint = points[index + 1];
-    if (nextPoint) {
-      const forwardHeading = computeHeadingBetweenPoints(point, nextPoint);
-      if (forwardHeading != null) return forwardHeading;
-    }
-
-    const previousPoint = points[index - 1];
-    if (previousPoint) {
-      return computeHeadingBetweenPoints(previousPoint, point);
-    }
-
-    return null;
-  };
-
   const buildPathArrowPoints = (points: PlannedCoordinate[]) => {
     if (points.length < 2) return [];
 
     const arrows: PlannedCoordinate[] = [];
-    const headingToleranceDeg = 12;
-    const { areaM2 } = getSelectionMetrics();
-    const arrowSpacingM = areaM2 > 12000 ? 36 : areaM2 > 4000 ? 24 : areaM2 > 1600 ? 16 : 10;
-    const minSegmentLengthM = arrowSpacingM * 0.9;
-    let segmentStart = 0;
+    const stride = points.length > 220 ? 18 : points.length > 140 ? 12 : points.length > 80 ? 8 : 5;
 
-    const pushArrow = (candidate: PlannedCoordinate) => {
-      const lastArrow = arrows[arrows.length - 1];
-      if (!lastArrow || haversineDistanceMeters(lastArrow, candidate) >= Math.max(1, arrowSpacingM * 0.35)) {
-        arrows.push(candidate);
-      }
-    };
+    for (let i = 2; i < points.length - 2; i += stride) {
+      const startPoint = points[i];
+      const endPoint = points[i + 1];
+      const legLengthM = haversineDistanceMeters(startPoint, endPoint);
+      const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint);
 
-    const flushSegment = (startIndex: number, endIndex: number) => {
-      if (endIndex <= startIndex) return;
+      if (legLengthM < 1.5 || headingDeg == null) continue;
 
-      const segmentDistances: number[] = [];
-      let segmentLengthM = 0;
-      for (let i = startIndex; i < endIndex; i++) {
-        const legLengthM = haversineDistanceMeters(points[i], points[i + 1]);
-        segmentDistances.push(legLengthM);
-        segmentLengthM += legLengthM;
-      }
-      if (segmentLengthM < minSegmentLengthM) return;
-
-      const arrowCount = Math.max(1, Math.floor(segmentLengthM / arrowSpacingM));
-      const spacing = segmentLengthM / arrowCount;
-
-      for (let arrowIndex = 0; arrowIndex < arrowCount; arrowIndex++) {
-        const targetDistance = spacing * (arrowIndex + 0.5);
-        let traversedM = 0;
-
-        for (let offset = 0; offset < segmentDistances.length; offset++) {
-          const legLengthM = segmentDistances[offset];
-          if (legLengthM <= 0) continue;
-
-          if (traversedM + legLengthM < targetDistance) {
-            traversedM += legLengthM;
-            continue;
-          }
-
-          const startPoint = points[startIndex + offset];
-          const endPoint = points[startIndex + offset + 1];
-          const ratio = Math.max(0, Math.min(1, (targetDistance - traversedM) / legLengthM));
-          const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint) ?? resolveHeadingForPoint(points, startIndex + offset);
-
-          if (headingDeg == null) {
-            break;
-          }
-
-          pushArrow({
-            latitude: startPoint.latitude + ((endPoint.latitude - startPoint.latitude) * ratio),
-            longitude: startPoint.longitude + ((endPoint.longitude - startPoint.longitude) * ratio),
-            headingDeg,
-          });
-          break;
-        }
-      }
-    };
-
-    for (let i = 1; i < points.length; i++) {
-      const previousHeading = resolveHeadingForPoint(points, i - 1);
-      const currentHeading = resolveHeadingForPoint(points, i);
-      if (previousHeading == null || currentHeading == null) continue;
-      const headingDelta = Math.abs((((currentHeading - previousHeading) + 540) % 360) - 180);
-      if (headingDelta > headingToleranceDeg) {
-        flushSegment(segmentStart, i);
-        segmentStart = i;
-      }
+      arrows.push({
+        latitude: (startPoint.latitude + endPoint.latitude) / 2,
+        longitude: (startPoint.longitude + endPoint.longitude) / 2,
+        headingDeg,
+      });
     }
 
-    flushSegment(segmentStart, points.length - 1);
     return arrows;
   };
   const diagonalCross = (base: LatLng, goal: LatLng, point: LatLng) => (
@@ -394,7 +474,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
-    setSelection({ boundary, baseStation: baseStationPoint ?? boundary[0], goal: boundary[2] });
+    const normalizedBoundary = orderBoundaryPoints(boundary[0], boundary[2], boundary[1], boundary[3]);
+    setSelection({ boundary: normalizedBoundary, baseStation: baseStationPoint ?? normalizedBoundary[0], goal: normalizedBoundary[2] });
     resetPlanningState();
   };
 
@@ -402,7 +483,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     if (!drawingMode) return;
     if (!firstPoint) {
       setFirstPoint(corner);
-      setMessage('First corner saved. Tap the opposite corner to finish the work zone.');
+      setMessage('First corner saved. Tap the opposite corner on the map to finish the work zone.');
       return;
     }
     const secondPoint = corner;
@@ -412,7 +493,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       { latitude: firstPoint.latitude, longitude: secondPoint.longitude },
       { latitude: secondPoint.latitude, longitude: firstPoint.longitude },
     );
-    const nextSelection = { baseStation: baseStationPoint ?? firstPoint, goal: secondPoint, boundary };
+    const nextSelection = { baseStation: baseStationPoint ?? firstPoint, goal: boundary[2], boundary };
     setSelection(nextSelection);
     resetPlanningState();
     setMessage('Work zone ready. Send it to the planner, then build the route.');
@@ -426,14 +507,40 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     });
   };
 
-  const handleMapPress = (event: MapPressEvent) => {
-    const { latitude, longitude } = event.nativeEvent.coordinate;
+  const handleCoordinateSelection = (coordinate: LatLng) => {
+    const { latitude, longitude } = coordinate;
+    setMapCenter({ latitude, longitude });
     if (placingBaseStation) {
-      applyBaseStationPoint({ latitude, longitude }, 'Base station pinned. Now mark the work area.');
+      applyBaseStationPoint({ latitude, longitude }, 'Base station pinned. Now tap the map to outline the service area.');
       return;
     }
     if (!drawingMode) return;
     applyCorner({ latitude, longitude });
+  };
+
+  const handleMapPress = (event: MapPressEvent) => {
+    handleCoordinateSelection(event.nativeEvent.coordinate);
+  };
+
+  const handleMapLongPress = (event: LongPressEvent) => {
+    handleCoordinateSelection(event.nativeEvent.coordinate);
+  };
+
+  const beginBaseStationPlacement = () => {
+    setPlacingBaseStation(true);
+    setBaseStationControlsVisible(true);
+    setDrawingMode(false);
+    setFirstPoint(null);
+    setMessage('Tap directly on the map where the base station should be placed.');
+  };
+
+  const beginAreaSelection = () => {
+    setSelection(null);
+    resetPlanningState();
+    setDrawingMode(true);
+    setPlacingBaseStation(false);
+    setFirstPoint(null);
+    setMessage('Tap the first corner on the map, then tap the opposite corner to finish the area.');
   };
 
   const zoomBy = async (delta: number) => {
@@ -444,7 +551,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       const nextZoom = Math.max(2, Math.min(22, currentZoom + delta));
       mapRef.current.animateCamera({ ...camera, zoom: nextZoom }, { duration: 180 });
     } catch {
-      setMessage('Zoom adjustment failed. Try again.');
+      const zoomFactor = delta > 0 ? 0.5 : 2;
+      mapRef.current.animateToRegion({
+        latitude: mapCenter.latitude,
+        longitude: mapCenter.longitude,
+        latitudeDelta: Math.max(0.0005, Math.min(40, mapSpan.latitudeDelta * zoomFactor)),
+        longitudeDelta: Math.max(0.0005, Math.min(40, mapSpan.longitudeDelta * zoomFactor)),
+      }, 180);
     }
   };
 
@@ -456,59 +569,251 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     updateSelectionFromBoundary(nextBoundary);
     setMessage(`${cornerLabels[index]} updated. Send the area again before building a route.`);
   };
-  const toggleMapType = () => {
-    setMapType((prevType) => {
-      const nextType = prevType === 'standard' ? 'satellite' : 'standard';
-      setMessage(nextType === 'satellite' ? 'Satellite view enabled.' : 'Standard map view enabled.');
-      return nextType;
-    });
+
+  const toggleMapMode = () => {
+    const nextType: 'standard' | 'satellite' = mapType === 'standard' ? 'satellite' : 'standard';
+    setMapType(nextType);
+    setMessage(nextType === 'satellite' ? 'Satellite view enabled.' : 'Standard map view enabled.');
   };
 
   useEffect(() => {
-    if (locationPromptedRef.current || baseStationPoint) return;
+    if (!plannerReady || locationPromptedRef.current || baseStationPoint) return;
     locationPromptedRef.current = true;
     setLocationPromptVisible(true);
+  }, [baseStationPoint, plannerReady]);
+
+  useEffect(() => {
+    if (!baseStationPoint) return;
+    setLocationPromptVisible(false);
   }, [baseStationPoint]);
 
-  const loadCoverageGrid = async () => {
-    try {
-      const response = await getJson<CoverageResponse>(serverUrl, '/api/coverage');
-      setCoverageCells(
-        (response.grid?.cells ?? []).map((cell) => ({
-          ...cell,
-          polygon: (cell.polygon ?? []).map((point) => ({
-            latitude: point.lat,
-            longitude: point.lon,
+  const loadCoverageGrid = async (force = false) => {
+    if (!force && coverageRequestRef.current) {
+      return coverageRequestRef.current;
+    }
+    if (!force && coverageRefreshAtRef.current > 0 && Date.now() - coverageRefreshAtRef.current < 1200) {
+      return coverageCells.length > 0;
+    }
+
+    const request = (async () => {
+      try {
+        const response = await getJson<CoverageResponse>(serverUrl, '/api/coverage');
+        setCoverageCells(
+          (response.grid?.cells ?? []).map((cell) => ({
+            ...cell,
+            polygon: (cell.polygon ?? []).map((point) => ({
+              latitude: point.lat,
+              longitude: point.lon,
+            })),
           })),
-        })),
+        );
+        coverageRefreshAtRef.current = Date.now();
+        return true;
+      } catch {
+        if (force) {
+          setCoverageCells([]);
+        }
+        return false;
+      }
+    })();
+
+    coverageRequestRef.current = request;
+    try {
+      return await request;
+    } finally {
+      coverageRequestRef.current = null;
+    }
+  };
+
+  const appendRobotTrailPoint = (coordinate: LatLng) => {
+    setRobotTrail((current) => {
+      const lastPoint = current[current.length - 1];
+      if (lastPoint && haversineDistanceMeters(lastPoint, coordinate) < 0.25) {
+        return current;
+      }
+      const nextTrail = [...current, coordinate];
+      return nextTrail.slice(-240);
+    });
+  };
+
+  const applyRemotePlannerState = async (
+    remoteState: PlannerPublicState | null | undefined,
+    fitToState = false,
+    includePlanningState = true,
+  ) => {
+    if (!remoteState) return;
+
+    const nextBaseStation = toLatLngPoint(remoteState.baseStation)
+      ?? toLatLngPoint(remoteState.remoteBaseStation)
+      ?? toLatLngPoint(remoteState.homePoint);
+    const nextBoundary = includePlanningState ? toLatLngPoints(remoteState.boundary).slice(0, 4) : [];
+    const nextPlannedPath = includePlanningState ? toPlannedCoordinates(remoteState.lastPath) : [];
+    const nextRobotPoint = toLatLngPoint(remoteState.robot);
+    const nextRobotTrail = toLatLngPoints(remoteState.trail);
+
+    setDrawingMode(false);
+    setFirstPoint(null);
+    setPlacingBaseStation(false);
+
+    setBaseStationPoint(nextBaseStation);
+    if (nextBaseStation) {
+      setMapCenter(nextBaseStation);
+    }
+
+    if (nextBoundary.length === 4) {
+      setSelection({
+        boundary: nextBoundary,
+        baseStation: nextBaseStation ?? nextBoundary[0],
+        goal: nextBoundary[2],
+      });
+      setAreaSubmitted(true);
+      void loadCoverageGrid(true);
+    } else if (includePlanningState) {
+      setSelection(null);
+      setAreaSubmitted(false);
+      setCoverageCells([]);
+    }
+
+    if (includePlanningState) {
+      setPlannedPath(nextPlannedPath);
+      setPlannedPathDistanceM(computePathDistanceMeters(nextPlannedPath));
+    }
+    setRobotPoint(nextRobotPoint);
+    setRobotTrail(nextRobotTrail);
+
+    if (includePlanningState && nextPlannedPath.length > 1) {
+      setMessage(`Saved route loaded: ${nextPlannedPath.length} points over ${(computePathDistanceMeters(nextPlannedPath) / 1000).toFixed(2)} km.`);
+    } else if (includePlanningState && nextBoundary.length === 4) {
+      setMessage('Saved service area loaded. You can adjust it or build the route again.');
+    } else if (nextBaseStation) {
+      setMessage('Base station loaded. Tap the map to outline the service area.');
+    } else {
+      setMessage(DEFAULT_PLANNING_MESSAGE);
+    }
+
+    if (fitToState) {
+      const focusPoints = nextPlannedPath.length > 1
+        ? nextPlannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))
+        : nextBoundary.length === 4
+          ? nextBoundary
+          : nextBaseStation
+            ? [nextBaseStation]
+            : nextRobotPoint
+              ? [nextRobotPoint]
+              : [];
+      fitMapToCoordinates(focusPoints);
+    }
+  };
+
+  const refreshPlannerState = async (fitToState = false, includePlanningState = true) => {
+    try {
+      const response = await getJson<PlannerStateResponse>(serverUrl, '/api/state');
+      await applyRemotePlannerState(response.state, fitToState, includePlanningState);
+    } catch {
+      if (!planningCache.baseStation && !planningCache.selection) {
+        setMessage(DEFAULT_PLANNING_MESSAGE);
+      }
+    } finally {
+      setPlannerReady(true);
+    }
+  };
+
+  useEffect(() => {
+    locationPromptedRef.current = false;
+    setPlannerReady(false);
+    setSelection(null);
+    setPlannedPath([]);
+    setPlannedPathDistanceM(0);
+    setCoverageCells([]);
+    setAreaSubmitted(false);
+    setDrawingMode(false);
+    setFirstPoint(null);
+    void refreshPlannerState(true, false);
+  }, [serverUrl]);
+
+  useEffect(() => {
+    const socket = new WebSocket(toWebSocketUrl(serverUrl));
+
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data as string) as PlannerSocketMessage;
+
+        if (message.event === 'state.snapshot') {
+          void applyRemotePlannerState(message.payload as PlannerPublicState, false, false);
+          return;
+        }
+
+        if (message.event === 'area.updated') {
+          void refreshPlannerState(false, true);
+          return;
+        }
+
+        if (message.event === 'path.updated') {
+          const nextPath = toPlannedCoordinates(message.payload?.points);
+          setPlannedPath(nextPath);
+          setPlannedPathDistanceM(computePathDistanceMeters(nextPath));
+          if (nextPath.length > 1) {
+            setMessage(`Route ready: ${nextPath.length} points over ${(computePathDistanceMeters(nextPath) / 1000).toFixed(2)} km.`);
+          }
+          void loadCoverageGrid(true);
+          return;
+        }
+
+        if (message.event === 'telemetry.updated') {
+          const nextRobotPoint = toLatLngPoint(message.payload?.robot);
+          if (nextRobotPoint) {
+            setRobotPoint(nextRobotPoint);
+            appendRobotTrailPoint(nextRobotPoint);
+          }
+          void loadCoverageGrid(false);
+        }
+      } catch {
+        // Ignore malformed socket messages and keep the planner interactive.
+      }
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, [serverUrl]);
+
+  const saveAreaToServer = async () => {
+    if (!selection) {
+      setMessage('Outline the service area first.');
+      return false;
+    }
+    const resolvedBaseStation = baseStationPoint ?? selection.baseStation ?? null;
+    if (!resolvedBaseStation) {
+      setMessage('Set the base station location first so the route knows where to start and return.');
+      return false;
+    }
+
+    try {
+      const cellSizeM = resolvePlanningCellSizeM();
+      await postJson(serverUrl, '/api/input-area', {
+        baseStation: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+        homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+        boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
+        cellSizeM,
+      });
+      setAreaSubmitted(true);
+      const gridLoaded = await loadCoverageGrid(true);
+      setMessage(
+        gridLoaded
+          ? `Service area saved at ${cellSizeM.toFixed(cellSizeM < 1 ? 2 : 1)}m grid resolution. You can build the route now.`
+          : 'Service area saved, but the grid preview is unavailable right now.',
       );
       return true;
-    } catch {
-      setCoverageCells([]);
+    } catch (requestError) {
+      setMessage(requestError instanceof Error ? requestError.message : 'Could not save the service area.');
       return false;
     }
   };
 
   const submitArea = async () => {
-    if (!selection) return;
-    const resolvedBaseStation = baseStationPoint ?? selection.baseStation ?? null;
-    if (!resolvedBaseStation) {
-      setMessage('Set the base station location first so the route knows where to start and return.');
-      return;
-    }
     setBusy('area');
     try {
-      await postJson(serverUrl, '/api/input-area', {
-        baseStation: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-        homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-        boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
-        cellSizeM: 2,
-      });
-      setAreaSubmitted(true);
-      const gridLoaded = await loadCoverageGrid();
-      setMessage(gridLoaded ? 'Work area sent. You can build the route now.' : 'Work area sent, but the grid preview is unavailable right now.');
-    } catch (requestError) {
-      setMessage(requestError instanceof Error ? requestError.message : 'Could not send the work area.');
+      await saveAreaToServer();
     } finally {
       setBusy(null);
     }
@@ -521,22 +826,38 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       setMessage('Set the base station location first so the route knows where to start and return.');
       return;
     }
-    if (!areaSubmitted) {
-      setMessage('Send the area to the planner first.');
-      return;
-    }
     setBusy('path');
     try {
-      const result = await postJson<{ ok: boolean; points: PlannedPoint[] }>(serverUrl, '/api/path/plan', {
-        mode: 'coverage',
-        start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-        goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
-        homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-        coverageWidthM: 0.5,
-        returnToBase: true,
-        saltPct,
-        brinePct,
-      });
+      if (!areaSubmitted) {
+        const saved = await saveAreaToServer();
+        if (!saved) return;
+      }
+
+      let result: { ok: boolean; points: PlannedPoint[]; mode?: string | null };
+      let routeModeLabel = 'coverage route';
+      try {
+        result = await postJson<{ ok: boolean; points: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+          mode: 'coverage',
+          start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+          goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
+          homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+          coverageWidthM: 0.5,
+          returnToBase: false,
+          saltPct,
+          brinePct,
+        });
+      } catch (coverageError) {
+        result = await postJson<{ ok: boolean; points: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+          mode: 'goal',
+          start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+          goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
+          homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
+          returnToBase: false,
+          saltPct,
+          brinePct,
+        });
+        routeModeLabel = 'travel route';
+      }
       const points = (result?.points ?? []).map((point) => ({
         latitude: point.lat,
         longitude: point.lon,
@@ -545,7 +866,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       setPlannedPath(points);
       const totalDistance = computePathDistanceMeters(points);
       setPlannedPathDistanceM(totalDistance);
-      await loadCoverageGrid();
+      await loadCoverageGrid(true);
       if (points.length > 1) {
         requestAnimationFrame(() => {
           mapRef.current?.fitToCoordinates(points.map((point) => ({
@@ -560,7 +881,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       if (saltPct === 0 && brinePct === 0) {
         setMessage('Route ready, but warning: 0% salt and 0% brine cannot be started.');
       } else {
-        setMessage(`Route ready: ${points.length} points over ${(totalDistance / 1000).toFixed(2)} km.`);
+        setMessage(`Route ready: ${points.length} points over ${(totalDistance / 1000).toFixed(2)} km (${routeModeLabel}).`);
       }
     } catch (requestError) {
       setPlannedPath([]);
@@ -572,7 +893,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const { widthM, heightM, areaM2 } = getSelectionMetrics();
-  const arrowSize = areaM2 > 4000 ? 22 : areaM2 > 1600 ? 18 : 14;
+  const arrowSize = areaM2 > 4000 ? 34 : areaM2 > 1600 ? 30 : 26;
   const pathArrowPoints = buildPathArrowPoints(plannedPath);
   const activeBaseStation = baseStationPoint ?? selection?.baseStation ?? null;
 
@@ -582,34 +903,94 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         <MapView
           ref={mapRef}
           style={styles.map}
-          provider={PROVIDER_GOOGLE}
+          provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
           mapType={mapType}
-          showsPointsOfInterests={false}
+          showsPointsOfInterest={false}
           toolbarEnabled={false}
+          moveOnMarkerPress={false}
+          loadingEnabled
+          loadingIndicatorColor="#2c6fb7"
+          loadingBackgroundColor="#eef3f9"
           initialRegion={{
-            latitude: 41.0731,
-            longitude: -81.5171,
+            latitude: mapCenter.latitude,
+            longitude: mapCenter.longitude,
             latitudeDelta: 0.01,
             longitudeDelta: 0.01,
           }}
           maxZoomLevel={22}
           minZoomLevel={2}
           onPress={handleMapPress}
+          onLongPress={handleMapLongPress}
+          onRegionChangeComplete={(region) => {
+            setMapCenter({ latitude: region.latitude, longitude: region.longitude });
+            setMapSpan({ latitudeDelta: region.latitudeDelta, longitudeDelta: region.longitudeDelta });
+          }}
           zoomEnabled
           scrollEnabled
           rotateEnabled={false}
           pitchEnabled={false}
         >
           {activeBaseStation ? (
+            <>
+              <MapCircle
+                center={activeBaseStation}
+                radius={6}
+                strokeColor="rgba(44,111,183,0.45)"
+                fillColor="rgba(44,111,183,0.12)"
+              />
+              <Marker
+                coordinate={activeBaseStation}
+                anchor={{ x: 0.5, y: 1 }}
+                title="Base station"
+                description="Autonomy starts and returns here"
+                tracksViewChanges={false}
+                draggable
+                onDragEnd={(event) => {
+                  applyBaseStationPoint(event.nativeEvent.coordinate, 'Base station moved. Save the area again if you want the planner to use the new location.');
+                }}
+              >
+                <View style={styles.baseStationMarkerWrap}>
+                  <View style={styles.baseStationMarkerLabel}>
+                    <Text style={styles.baseStationMarkerLabelText}>Base</Text>
+                  </View>
+                  <View style={styles.baseStationMarker}>
+                    <MaterialCommunityIcons name="radio-tower" size={16} color="#ffffff" />
+                  </View>
+                </View>
+              </Marker>
+            </>
+          ) : null}
+          {robotTrail.length > 1 ? (
+            <Polyline
+              coordinates={robotTrail}
+              strokeColor="rgba(22,50,79,0.28)"
+              strokeWidth={3}
+              geodesic
+            />
+          ) : null}
+          {robotPoint ? (
             <Marker
-              coordinate={activeBaseStation}
-              anchor={{ x: 0.5, y: 1 }}
-              title="Base station"
-              description="Autonomy starts and returns here"
+              coordinate={robotPoint}
+              anchor={{ x: 0.5, y: 0.5 }}
+              flat
+              title="Robot"
+              description="Live position"
+              tracksViewChanges={false}
             >
-              <View style={styles.baseStationMarker}>
-                <MaterialCommunityIcons name="radio-tower" size={16} color="#ffffff" />
+              <View style={styles.robotMarker}>
+                <MaterialCommunityIcons name="robot-industrial" size={16} color="#ffffff" />
               </View>
+            </Marker>
+          ) : null}
+          {drawingMode && firstPoint ? (
+            <Marker
+              coordinate={firstPoint}
+              anchor={{ x: 0.5, y: 0.5 }}
+              title="First corner"
+              description="Tap the opposite corner to finish the area"
+              tracksViewChanges={false}
+            >
+              <CornerPin tone="start" />
             </Marker>
           ) : null}
           {selection ? (
@@ -618,16 +999,16 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                 <Polygon
                   key={`grid-${cell.row}-${cell.col}`}
                   coordinates={cell.polygon}
-                  strokeColor={cell.covered ? 'rgba(45,138,101,0.30)' : 'rgba(31,95,159,0.24)'}
-                  fillColor="transparent"
-                  strokeWidth={1}
+                  strokeColor={cell.covered ? 'rgba(42,116,215,0.36)' : 'rgba(42,116,215,0.22)'}
+                  fillColor={cell.covered ? 'rgba(62,143,255,0.14)' : 'rgba(62,143,255,0.08)'}
+                  strokeWidth={1.2}
                 />
               ))}
               <Polygon
                 coordinates={selection.boundary}
-                strokeColor="#2c6fb7"
-                fillColor="rgba(44,111,183,0.12)"
-                strokeWidth={2}
+                strokeColor="#2a74d7"
+                fillColor="rgba(62,143,255,0.16)"
+                strokeWidth={3}
               />
               {selection.boundary.map((point, index) => (
                 <Marker
@@ -638,9 +1019,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   title={cornerLabels[index]}
                   description={'Press and hold, then drag to adjust this corner'}
                   onDragEnd={(event) => moveBoundaryCorner(index, event.nativeEvent.coordinate)}
+                  tracksViewChanges={false}
                 >
                   <CornerPin
-                    index={index}
                     tone={index === 0 ? 'start' : index === 2 ? 'goal' : 'edge'}
                   />
                 </Marker>
@@ -649,14 +1030,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                 <>
                   <Polyline
                     coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
-                    strokeColor="#ffffff"
-                    strokeWidth={8}
+                    strokeColor="rgba(255,255,255,0.96)"
+                    strokeWidth={10}
                     geodesic
                   />
                   <Polyline
                     coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
-                    strokeColor="#1f5f9f"
-                    strokeWidth={4}
+                    strokeColor="#6f52ed"
+                    strokeWidth={5}
                     geodesic
                   />
                   {pathArrowPoints.map((point, index) => (
@@ -674,7 +1055,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                           { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
                         ]}
                       >
-                        <DirectionArrow size={Math.max(14, arrowSize)} color="#1f5f9f" />
+                        <DirectionArrow size={Math.max(18, arrowSize)} color="#6f52ed" />
                       </View>
                     </Marker>
                   ))}
@@ -723,13 +1104,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           </Text>
         </View>
         <View style={styles.modeChipActions}>
-          <AppButton label={mapType === 'standard' ? 'Satellite' : 'Standard'} onPress={toggleMapType} variant="outline" style={styles.mapTypeAction}>
-            <MaterialCommunityIcons
-              name={mapType === 'standard' ? 'satellite-variant' : 'map-outline'}
-              size={16}
-              color="#2c6fb7"
-            />
-          </AppButton>
+          <AppButton
+            label={mapType === 'standard' ? 'Satellite' : 'Standard'}
+            onPress={toggleMapMode}
+            variant={mapType === 'satellite' ? 'primary' : 'outline'}
+            compact
+            style={[styles.mapTypeAction, mapType === 'satellite' ? styles.mapTypeActionActive : null]}
+          />
         </View>
       </View>
 
@@ -737,30 +1118,58 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         <Text style={[styles.overlayText, { color: theme.text }]} numberOfLines={2}>{message}</Text>
 
         {activeBaseStation ? (
-          <View style={styles.baseStationSummaryRow}>
-            <View style={styles.baseStationSummaryCard}>
-              <View style={styles.baseStationSummaryIcon}>
-                <MaterialCommunityIcons name="radio-tower" size={14} color="#ffffff" />
+          <View style={styles.baseStationSummaryBlock}>
+            <View style={styles.baseStationSummaryRow}>
+              <View style={styles.baseStationSummaryCard}>
+                <View style={styles.baseStationSummaryIcon}>
+                  <MaterialCommunityIcons name="radio-tower" size={14} color="#ffffff" />
+                </View>
+                <View style={styles.baseStationSummaryText}>
+                  <Text style={styles.baseStationSummaryTitle}>Base station ready</Text>
+                  <Text style={styles.baseStationSummaryMeta}>
+                    {activeBaseStation.latitude.toFixed(5)}, {activeBaseStation.longitude.toFixed(5)}
+                  </Text>
+                </View>
               </View>
-              <View style={styles.baseStationSummaryText}>
-                <Text style={styles.baseStationSummaryTitle}>Base station ready</Text>
-                <Text style={styles.baseStationSummaryMeta}>
-                  {activeBaseStation.latitude.toFixed(5)}, {activeBaseStation.longitude.toFixed(5)}
-                </Text>
-              </View>
+              <AppButton
+                label={placingBaseStation ? 'Cancel' : (baseStationControlsVisible ? 'Hide Move' : 'Move Base')}
+                onPress={() => {
+                  if (placingBaseStation) {
+                    setPlacingBaseStation(false);
+                    setBaseStationControlsVisible(false);
+                    setMessage('Base station placement canceled.');
+                    return;
+                  }
+                  setBaseStationControlsVisible((current) => !current);
+                }}
+                variant="outline"
+                compact
+                style={styles.summaryActionButton}
+              />
             </View>
-            <AppButton
-              label={placingBaseStation ? 'Tap Map' : 'Move Pin'}
-              onPress={() => {
-                setPlacingBaseStation(true);
-                setDrawingMode(false);
-                setFirstPoint(null);
-                setMessage('Tap the map to move the base station pin.');
-              }}
-              variant="outline"
-              compact
-              style={styles.summaryActionButton}
-            />
+            {baseStationControlsVisible ? (
+              <View style={styles.actionRow}>
+                <AppButton
+                  label={busy === 'locate' ? 'Locating...' : 'Use My Location'}
+                  onPress={() => { void usePhoneLocationForBaseStation(); }}
+                  disabled={busy !== null}
+                  variant="outline"
+                  style={styles.secondaryAction}
+                />
+                <AppButton
+                  label={placingBaseStation ? 'Tap to Place' : 'Tap on Map'}
+                  onPress={() => {
+                    if (placingBaseStation) {
+                      setMessage('Tap directly on the map where the base station should be placed.');
+                      return;
+                    }
+                    beginBaseStationPlacement();
+                  }}
+                  variant="outline"
+                  style={styles.secondaryAction}
+                />
+              </View>
+            ) : null}
           </View>
         ) : (
           <View style={styles.actionRow}>
@@ -772,18 +1181,30 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               style={styles.secondaryAction}
             />
             <AppButton
-              label={placingBaseStation ? 'Tap Map For Pin' : 'Mark on Map'}
+              label={placingBaseStation ? 'Cancel' : 'Tap on Map'}
               onPress={() => {
-                setPlacingBaseStation(true);
-                setDrawingMode(false);
-                setFirstPoint(null);
-                setMessage('Tap the map where the base station is parked.');
+                if (placingBaseStation) {
+                  setPlacingBaseStation(false);
+                  setMessage(DEFAULT_PLANNING_MESSAGE);
+                  return;
+                }
+                beginBaseStationPlacement();
               }}
               variant="outline"
               style={styles.secondaryAction}
             />
           </View>
         )}
+
+        {(placingBaseStation || drawingMode) ? (
+          <Text style={styles.pathMetaText}>
+            {placingBaseStation
+              ? 'Tap once on the map to place the base station.'
+              : (firstPoint
+                  ? 'Tap the opposite corner on the map to finish the area.'
+                  : 'Tap the first corner on the map to start the area.')}
+          </Text>
+        ) : null}
 
         {plannedPath.length > 1 ? (
           <Text style={styles.pathMetaText}>
@@ -797,17 +1218,20 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         <View style={styles.actionRow}>
           <AppButton
-            label={drawingMode ? 'Marking...' : 'Outline Area'}
+            label="Outline Area"
             onPress={() => {
-              setSelection(null);
-              resetPlanningState();
-              setDrawingMode(true);
-              setPlacingBaseStation(false);
-              setFirstPoint(null);
-              setMessage('Pick two opposite corners to outline the service area.');
+              if (!drawingMode) {
+                beginAreaSelection();
+                return;
+              }
+              setMessage(
+                firstPoint
+                  ? 'Tap the opposite corner on the map to finish the area.'
+                  : 'Tap the first corner on the map to start the area.',
+              );
             }}
-            variant="outline"
-            style={styles.secondaryAction}
+            variant={drawingMode ? 'primary' : 'outline'}
+            style={[styles.secondaryAction, drawingMode ? styles.outlineAreaButtonActive : null]}
           />
           <AppButton
             label="Clear Plan"
@@ -839,12 +1263,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           <AppButton
             label={busy === 'path' ? 'Building Route...' : 'Build Route'}
             onPress={planPath}
-            disabled={!selection || !areaSubmitted || busy !== null}
+            disabled={!selection || busy !== null}
             variant="primary"
             style={[
               styles.statefulButton,
               styles.actionFill,
-              !selection || !areaSubmitted || busy !== null ? styles.buttonDisabled : styles.buttonPlan,
+              !selection || busy !== null ? styles.buttonDisabled : styles.buttonPlan,
             ]}
           />
         </View>
@@ -852,7 +1276,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       <AppNoticeModal
         visible={locationPromptVisible}
         title="Set base station location"
-        message="Use your phone location for the base station, or tap the map to place it manually before planning the route."
+        message="Use your phone location for the base station, or tap directly on the map to place it manually before planning the route."
         tone="info"
         primaryAction={{
           label: 'Use My Location',
@@ -862,8 +1286,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           label: 'Mark on Map',
           variant: 'outline',
           onPress: () => {
-            setPlacingBaseStation(true);
-            setMessage('Tap the map where the base station is parked, then mark the work area.');
+            beginBaseStationPlacement();
           },
         }}
         onClose={() => setLocationPromptVisible(false)}
@@ -882,6 +1305,25 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
+  },
+  crosshairWrap: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    marginLeft: -24,
+    marginTop: -24,
+    zIndex: 15,
+    elevation: 8,
+  },
+  crosshairRing: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(248,251,255,0.78)',
+    borderWidth: 1,
+    borderColor: 'rgba(31,95,159,0.22)',
   },
   overlay: {
     position: 'absolute',
@@ -905,7 +1347,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d9e4f0',
     borderRadius: 12,
-    padding: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
     zIndex: 30,
     elevation: 12,
   },
@@ -913,7 +1356,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     top: 64,
-    width: 144,
+    width: 196,
     backgroundColor: 'rgba(248,251,255,0.95)',
     borderWidth: 1,
     borderColor: '#d9e4f0',
@@ -933,12 +1376,17 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   modeChipActions: {
-    gap: 8,
+    flexDirection: 'row',
+    gap: 6,
   },
   mapTypeAction: {
+    flex: 1,
     minHeight: 34,
     minWidth: 0,
     paddingHorizontal: 8,
+  },
+  mapTypeActionActive: {
+    borderColor: '#1f5f9f',
   },
   modeChipText: {
     fontSize: 12,
@@ -954,20 +1402,20 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   zoomButton: {
-    minWidth: 40,
+    minWidth: 34,
     minHeight: 36,
     paddingHorizontal: 0,
   },
   zoomButtonText: {
     color: '#16324f',
-    fontSize: 20,
-    lineHeight: 20,
+    fontSize: 17,
+    lineHeight: 17,
   },
   overlayText: {
     marginBottom: 2,
     color: '#16324f',
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: '700',
   },
   actionRow: {
@@ -985,6 +1433,10 @@ const styles = StyleSheet.create({
   baseStationSummaryRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+    marginTop: 6,
+  },
+  baseStationSummaryBlock: {
     gap: 8,
     marginTop: 6,
   },
@@ -1028,11 +1480,11 @@ const styles = StyleSheet.create({
   },
   pathMetaText: {
     color: '#1f5f9f',
-    fontSize: 10,
+    fontSize: 9,
     marginTop: 6,
     marginBottom: 1,
     fontWeight: '600',
-    lineHeight: 14,
+    lineHeight: 12,
   },
   pinMarkerWrap: {
     width: 34,
@@ -1040,10 +1492,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'flex-start',
   },
+  baseStationMarkerWrap: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  baseStationMarkerLabel: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: '#16324f',
+    borderWidth: 1,
+    borderColor: '#2c6fb7',
+  },
+  baseStationMarkerLabelText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '800',
+  },
   baseStationMarker: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: '#16324f',
     borderWidth: 2,
     borderColor: '#ffffff',
@@ -1054,6 +1523,21 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
+  },
+  robotMarker: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#2d8a65',
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.14,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
   pinMarkerBadge: {
     position: 'absolute',
@@ -1079,6 +1563,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  pathArrowIcon: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pathArrowOutline: {
+    position: 'absolute',
+  },
+  pathArrowFill: {
+    position: 'absolute',
+  },
   pathArrowText: {
     color: '#1f5f9f',
     fontWeight: '800',
@@ -1096,6 +1590,10 @@ const styles = StyleSheet.create({
   },
   buttonPlan: {
     backgroundColor: '#2c6fb7',
+  },
+  outlineAreaButtonActive: {
+    backgroundColor: '#2a74d7',
+    borderColor: '#1f5f9f',
   },
   buttonDisabled: {
     backgroundColor: '#9eabb8',

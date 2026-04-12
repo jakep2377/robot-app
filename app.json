@@ -55,8 +55,7 @@
           "icon": "./assets/icon.png",
           "color": "#1f5f9f"
         }
-      ],
-      "expo-maps"
+      ]
     ],
 
     "extra": {

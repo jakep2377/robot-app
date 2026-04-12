@@ -608,16 +608,28 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   }, [serverUrl]);
 
   const applyCustomScheduleTime = () => {
-    const match = customTimeText.trim().match(/^(\d{1,2}):(\d{2})$/);
+    const match = customTimeText.trim().match(/^(\d{1,2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
     if (!match) {
-      showNotice({ title: "Enter time", message: "Use HH:MM for the selected day.", tone: "warning" });
+      showNotice({ title: "Enter time", message: "Use HH:MM or HH:MM AM/PM for the selected day.", tone: "warning" });
       return;
     }
 
-    const hours = Number.parseInt(match[1], 10);
+    let hours = Number.parseInt(match[1], 10);
     const minutes = Number.parseInt(match[2], 10);
-    if (hours > 23 || minutes > 59) {
-      showNotice({ title: "Invalid time", message: "Use a valid 24-hour time like 06:30 or 18:45.", tone: "warning" });
+    const meridiem = match[3]?.toUpperCase() ?? null;
+
+    if (meridiem) {
+      if (hours < 1 || hours > 12 || minutes > 59) {
+        showNotice({ title: "Invalid time", message: "Use a valid time like 6:30 AM or 6:45 PM.", tone: "warning" });
+        return;
+      }
+      if (meridiem === "AM") {
+        hours = hours === 12 ? 0 : hours;
+      } else {
+        hours = hours === 12 ? 12 : hours + 12;
+      }
+    } else if (hours > 23 || minutes > 59) {
+      showNotice({ title: "Invalid time", message: "Use a valid 24-hour time like 06:30 or 18:45, or add AM/PM.", tone: "warning" });
       return;
     }
 
@@ -630,7 +642,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     const timezone = forecast?.city?.timezone ?? weather?.timezone ?? 0;
     const scheduledAt = resolveScheduledUnix(dayKey, `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`, timezone);
     if (scheduledAt == null) {
-      showNotice({ title: "Invalid time", message: "Use a valid 24-hour time like 06:30 or 18:45.", tone: "warning" });
+      showNotice({ title: "Invalid time", message: "Use a valid time like 06:30, 6:30 AM, or 6:45 PM.", tone: "warning" });
       return;
     }
     if (scheduledAt <= Math.floor(Date.now() / 1000)) {
@@ -784,10 +796,17 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
           <AppButton
             label={locating ? "Updating Location..." : activeLocation.source === "phone" ? "Refresh Location" : "Use Current Location"}
             onPress={usePhoneLocation}
+            disabled={locating || loading}
             variant="outline"
-            style={styles.heroActionButton}
+            style={[styles.heroActionButton, locating || loading ? styles.heroActionButtonDisabled : null]}
           />
-          <AppButton label="Refresh Forecast" onPress={() => loadWeather(activeLocation)} variant="secondary" style={styles.heroActionButton} />
+          <AppButton
+            label="Refresh Forecast"
+            onPress={() => loadWeather(activeLocation)}
+            disabled={loading || locating}
+            variant="primary"
+            style={[styles.heroActionButton, styles.refreshForecastButton, loading || locating ? styles.heroActionButtonDisabled : null]}
+          />
         </View>
       </AppCard>
 
@@ -882,11 +901,12 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
             <TextInput
               style={styles.manualScheduleInput}
               value={customTimeText}
-              onChangeText={(text) => setCustomTimeText(text.replace(/[^0-9:]/g, "").slice(0, 5))}
-              placeholder="HH:MM"
+              onChangeText={(text) => setCustomTimeText(text.replace(/[^0-9: apmAPM]/g, "").slice(0, 8))}
+              placeholder="HH:MM AM"
               placeholderTextColor="#8aa0b6"
               keyboardType="numbers-and-punctuation"
-              maxLength={5}
+              autoCapitalize="characters"
+              maxLength={8}
             />
             <AppButton label="Use Time" onPress={applyCustomScheduleTime} variant="secondary" style={styles.manualScheduleButton} />
           </View>
@@ -997,11 +1017,11 @@ const styles = StyleSheet.create({
   badgeBlue: { backgroundColor: "#eef4fb", borderLeftColor: "#2c6fb7" },
   currentText: { color: "#36506a", fontSize: 14, fontWeight: "700" },
   manualLabel: { color: "#36506a", fontSize: 14, fontWeight: "700" },
-  manualRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
+  manualRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   manualField: { flex: 1, gap: 4, alignItems: "stretch" },
-  manualFieldLabel: { color: "#63788e", fontSize: 14, fontWeight: "700", textTransform: "uppercase", textAlign: "center" },
-  manualInput: { minHeight: 50, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 22, fontWeight: "700", textAlign: "center" },
-  manualButton: { minWidth: 96, minHeight: 50, alignSelf: "stretch" },
+  manualFieldLabel: { color: "#63788e", fontSize: 13, fontWeight: "700", textTransform: "uppercase", textAlign: "center" },
+  manualInput: { minHeight: 46, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 20, fontWeight: "700", textAlign: "center" },
+  manualButton: { minWidth: 84, minHeight: 44, alignSelf: "flex-end" },
   applyButton: { minHeight: 40 },
   applyButtonDone: { backgroundColor: "#2c6fb7" },
   schedulePrimary: { color: "#16324f", fontSize: 16, fontWeight: "700" },
@@ -1032,11 +1052,13 @@ const styles = StyleSheet.create({
   lookAheadMix: { color: "#2c6fb7", fontSize: 12, fontWeight: "700" },
   lookAheadMixActive: { color: "#2c6fb7" },
   manualScheduleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  manualScheduleInput: { flex: 1, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 16, fontWeight: "700" },
-  manualScheduleButton: { minWidth: 96, minHeight: 42 },
+  manualScheduleInput: { flex: 1, minHeight: 44, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 16, fontWeight: "700", textAlign: "center" },
+  manualScheduleButton: { minWidth: 118, minHeight: 46 },
   secondaryButton: { minHeight: 42 },
   primaryScheduleButton: { minHeight: 42, backgroundColor: "#2d8a65" },
   primaryScheduleButtonDisabled: { backgroundColor: "#9eabb8" },
+  refreshForecastButton: { backgroundColor: "#2a74d7", borderColor: "#1f5f9f" },
+  heroActionButtonDisabled: { opacity: 0.7 },
   conditionsCardContent: { gap: 12 },
   conditionsHint: { color: "#5b7288", fontSize: 13, lineHeight: 18 },
   conditionsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },

@@ -22,15 +22,15 @@ export default function AppCard({ title, children, style, contentStyle, titleSty
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: "#fbfdff",
+    backgroundColor: "#f7fbff",
     borderWidth: 1,
-    borderColor: "#d8e4f0",
-    borderRadius: 20,
+    borderColor: "#d4e0ec",
+    borderRadius: 22,
     shadowColor: "#0f172a",
-    shadowOpacity: 0.07,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 3,
+    shadowOpacity: 0.09,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
   },
   content: {
     padding: 18,
@@ -39,6 +39,7 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 18,
     fontWeight: "800",
-    color: "#16324f",
+    color: "#15304b",
+    letterSpacing: 0.2,
   },
 });
