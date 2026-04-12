@@ -22,6 +22,7 @@ export const JOYSTICK_PAD_SIZE = 172;
 export const JOYSTICK_KNOB_SIZE = 64;
 export const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
 export const JOYSTICK_DEAD_ZONE = 0.12;
+const JOYSTICK_SEND_MIN_INTERVAL_MS = 70;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -48,12 +49,25 @@ function computeJoystickValues(locationX: number, locationY: number) {
   return { x, y, turn, drive };
 }
 
-async function sendDriveCommand(serverUrl: string, drive: number, turn: number, lastSentRef: React.MutableRefObject<{ drive: number; turn: number }>) {
+async function sendDriveCommand(
+  serverUrl: string,
+  drive: number,
+  turn: number,
+  lastSentRef: React.MutableRefObject<{ drive: number; turn: number }>,
+  lastSentAtRef: React.MutableRefObject<number>,
+) {
   if (lastSentRef.current.drive === drive && lastSentRef.current.turn === turn) {
     return;
   }
 
+  const now = Date.now();
+  const isStop = (drive === 0 && turn === 0);
+  if (!isStop && (now - lastSentAtRef.current) < JOYSTICK_SEND_MIN_INTERVAL_MS) {
+    return;
+  }
+
   lastSentRef.current = { drive, turn };
+  lastSentAtRef.current = now;
 
   try {
     await postText(serverUrl, "/command", `DRIVE,THROTTLE:${drive},TURN:${turn}`);
@@ -90,6 +104,7 @@ export function JoystickControl({
   const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
   const [pressedManualButton, setPressedManualButton] = useState<string | null>(null);
   const lastJoystickSent = useRef({ drive: 0, turn: 0 });
+  const lastJoystickSentAt = useRef(0);
   const padRef = useRef<View | null>(null);
   const padLayout = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
@@ -116,7 +131,7 @@ export function JoystickControl({
 
   useEffect(() => {
     return () => {
-      sendDriveCommand(serverUrl, 0, 0, lastJoystickSent);
+      sendDriveCommand(serverUrl, 0, 0, lastJoystickSent, lastJoystickSentAt);
     };
   }, [serverUrl]);
 
@@ -127,12 +142,12 @@ export function JoystickControl({
     const nextState = { x: next.x, y: next.y, drive: next.drive, turn: next.turn, active };
 
     setJoystickState(nextState);
-    sendDriveCommand(serverUrl, next.drive, next.turn, lastJoystickSent);
+    sendDriveCommand(serverUrl, next.drive, next.turn, lastJoystickSent, lastJoystickSentAt);
   };
 
   const resetJoystick = () => {
     setJoystickState(emptyJoystickState);
-    sendDriveCommand(serverUrl, 0, 0, lastJoystickSent);
+    sendDriveCommand(serverUrl, 0, 0, lastJoystickSent, lastJoystickSentAt);
   };
 
   const joystickResponder = useMemo(
