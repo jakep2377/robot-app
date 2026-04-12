@@ -22,7 +22,7 @@ export const JOYSTICK_PAD_SIZE = 172;
 export const JOYSTICK_KNOB_SIZE = 64;
 export const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
 export const JOYSTICK_DEAD_ZONE = 0.12;
-const JOYSTICK_SEND_MIN_INTERVAL_MS = 70;
+const JOYSTICK_SEND_MIN_INTERVAL_MS = 40;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));

@@ -412,7 +412,7 @@ export default function ControllerScreen({
 
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, 1000);
+    const timer = setInterval(refresh, 400);
     return () => clearInterval(timer);
   }, [serverUrl]);
 
