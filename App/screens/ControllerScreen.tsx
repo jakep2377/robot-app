@@ -280,11 +280,11 @@ const MISSION_ENDPOINTS: Record<string, string> = {
 const JOYSTICK_PAD_SIZE = 172;
 const JOYSTICK_KNOB_SIZE = 64;
 const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
-const JOYSTICK_SEND_INTERVAL_MS = 105;
+const JOYSTICK_SEND_INTERVAL_MS = 85;
 const JOYSTICK_DEAD_ZONE = 0.145;
 const JOYSTICK_COMMAND_STEP = 2;
 const JOYSTICK_RESPONSE_CURVE = 1.3;
-const JOYSTICK_TOUCH_SLOP_PX = 7;
+const JOYSTICK_TOUCH_SLOP_PX = 8;
 const JOYSTICK_STRAIGHT_LOCK_THRESHOLD = 0.16;
 const JOYSTICK_STRAIGHT_ASSIST_START = 0.3;
 const JOYSTICK_STRAIGHT_TURN_SCALE = 0.34;
@@ -292,19 +292,24 @@ const JOYSTICK_AXIS_LOCK_MARGIN = 0.18;
 const JOYSTICK_AXIS_LOCK_BREAK = 0.3;
 const JOYSTICK_TURN_WHILE_DRIVING_SCALE = 0.22;
 const JOYSTICK_DRIVE_WHILE_TURNING_SCALE = 0.5;
-const JOYSTICK_INPUT_SMOOTHING = 0.255;
-const JOYSTICK_VISUAL_SMOOTHING = 0.38;
-const JOYSTICK_EDGE_FOLLOW_BOOST = 0.2;
-const JOYSTICK_CENTER_SETTLE = 0.065;
-const JOYSTICK_COMMAND_HYSTERESIS = 10;
+const JOYSTICK_INPUT_SMOOTHING = 0.29;
+const JOYSTICK_VISUAL_SMOOTHING = 0.44;
+const JOYSTICK_EDGE_FOLLOW_BOOST = 0.16;
+const JOYSTICK_CENTER_SETTLE = 0.085;
+const JOYSTICK_COMMAND_HYSTERESIS = 12;
 const JOYSTICK_CENTER_DAMP_ZONE = 0.3;
 const JOYSTICK_CENTER_DAMP_SCALE = 0.68;
 const JOYSTICK_MID_DAMP_ZONE = 0.52;
 const JOYSTICK_MID_DAMP_SCALE = 0.9;
-const JOYSTICK_COMMAND_MAX_STEP = 14;
+const JOYSTICK_COMMAND_MAX_STEP = 12;
 const JOYSTICK_REVERSAL_GUARD = 14;
-const MANUAL_BUTTON_INITIAL_REPEAT_MS = 220;
-const MANUAL_BUTTON_REPEAT_MS = 180;
+const JOYSTICK_FORCE_SEND_DELTA = 12;
+const JOYSTICK_FORCE_SEND_GAP_MS = 45;
+const JOYSTICK_INNER_VISUAL_SMOOTHING = 0.6;
+const JOYSTICK_INNER_COMMAND_SMOOTHING = 0.42;
+const JOYSTICK_INNER_RADIUS = 0.5;
+const MANUAL_BUTTON_INITIAL_REPEAT_MS = 150;
+const MANUAL_BUTTON_REPEAT_MS = 120;
 
 function clampJoystickAxis(value: number): number {
   return Math.max(-1, Math.min(1, value));
@@ -329,7 +334,11 @@ function snapJoystickPercent(value: number): number {
 }
 
 function smoothJoystickAxis(previous: number, next: number): number {
-  const blend = Math.abs(next) > Math.abs(previous) ? JOYSTICK_INPUT_SMOOTHING : JOYSTICK_INPUT_SMOOTHING * 0.78;
+  const radius = Math.min(1, Math.abs(next));
+  const baseBlend = radius < JOYSTICK_INNER_RADIUS
+    ? JOYSTICK_INNER_COMMAND_SMOOTHING
+    : JOYSTICK_INPUT_SMOOTHING;
+  const blend = Math.abs(next) > Math.abs(previous) ? baseBlend : baseBlend * 0.78;
   const filtered = previous + (next - previous) * blend;
   return Math.abs(filtered) < JOYSTICK_CENTER_SETTLE ? 0 : filtered;
 }
@@ -340,7 +349,10 @@ function smoothJoystickVector(
   baseBlend: number,
 ): { turn: number; drive: number } {
   const radius = Math.min(1, Math.hypot(next.turn, next.drive));
-  const blend = Math.min(0.78, baseBlend + radius * JOYSTICK_EDGE_FOLLOW_BOOST);
+  const effectiveBaseBlend = radius < JOYSTICK_INNER_RADIUS
+    ? Math.max(baseBlend, JOYSTICK_INNER_VISUAL_SMOOTHING)
+    : baseBlend;
+  const blend = Math.min(0.78, effectiveBaseBlend + radius * JOYSTICK_EDGE_FOLLOW_BOOST);
   const turn = previous.turn + (next.turn - previous.turn) * blend;
   const drive = previous.drive + (next.drive - previous.drive) * blend;
   return {
@@ -569,6 +581,7 @@ export default function ControllerScreen({
   const joystickInFlight = useRef(false);
   const queuedJoystickCommand = useRef<{ drive: number; turn: number; refreshAfter: boolean } | null>(null);
   const lastJoystickSent = useRef({ drive: 0, turn: 0 });
+  const lastJoystickDispatchAt = useRef(0);
   const joystickKnobPosition = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const joystickAxisLock = useRef<'free' | 'drive' | 'turn'>('free');
   const joystickFilteredInput = useRef({ turn: 0, drive: 0 });
@@ -605,7 +618,7 @@ export default function ControllerScreen({
 
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, 2500);
+    const timer = setInterval(refresh, 1000);
     return () => clearInterval(timer);
   }, [serverUrl]);
 
@@ -731,6 +744,7 @@ export default function ControllerScreen({
     }
 
     joystickInFlight.current = true;
+    lastJoystickDispatchAt.current = Date.now();
     try {
       await postText(serverUrl, "/command", `DRIVE,THROTTLE:${nextDrive},TURN:${nextTurn}`);
       lastJoystickSent.current = { drive: nextDrive, turn: nextTurn };
@@ -824,6 +838,18 @@ export default function ControllerScreen({
     const shouldKickImmediate = !joystickTimer.current;
     ensureJoystickLoop();
     if (shouldKickImmediate) {
+      void postDriveVector(drive, turn);
+      return;
+    }
+
+    const elapsedSinceDispatch = Date.now() - lastJoystickDispatchAt.current;
+    const driveDelta = Math.abs(drive - lastJoystickSent.current.drive);
+    const turnDelta = Math.abs(turn - lastJoystickSent.current.turn);
+    if (
+      !joystickInFlight.current
+      && elapsedSinceDispatch >= JOYSTICK_FORCE_SEND_GAP_MS
+      && (driveDelta >= JOYSTICK_FORCE_SEND_DELTA || turnDelta >= JOYSTICK_FORCE_SEND_DELTA)
+    ) {
       void postDriveVector(drive, turn);
     }
   };
