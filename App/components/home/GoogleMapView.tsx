@@ -255,6 +255,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const locationPromptedRef = useRef(false);
   const coverageRefreshAtRef = useRef(0);
   const coverageRequestRef = useRef<Promise<boolean> | null>(null);
+  const plannerDraftRef = useRef(false);
 
   const theme = {
     overlayBg: 'rgba(248,251,255,0.95)',
@@ -292,6 +293,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const applyBaseStationPoint = (coordinate: LatLng, nextMessage?: string) => {
+    plannerDraftRef.current = true;
     setBaseStationPoint(coordinate);
     setSelection((current) => (current ? { ...current, baseStation: coordinate } : current));
     setPlacingBaseStation(false);
@@ -474,6 +476,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
+    plannerDraftRef.current = true;
     const normalizedBoundary = orderBoundaryPoints(boundary[0], boundary[2], boundary[1], boundary[3]);
     setSelection({ boundary: normalizedBoundary, baseStation: baseStationPoint ?? normalizedBoundary[0], goal: normalizedBoundary[2] });
     resetPlanningState();
@@ -482,10 +485,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const applyCorner = (corner: LatLng) => {
     if (!drawingMode) return;
     if (!firstPoint) {
+      plannerDraftRef.current = true;
       setFirstPoint(corner);
       setMessage('First corner saved. Tap the opposite corner on the map to finish the work zone.');
       return;
     }
+    plannerDraftRef.current = true;
     const secondPoint = corner;
     const boundary = orderBoundaryPoints(
       firstPoint,
@@ -527,6 +532,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const beginBaseStationPlacement = () => {
+    plannerDraftRef.current = true;
     setPlacingBaseStation(true);
     setBaseStationControlsVisible(true);
     setDrawingMode(false);
@@ -535,6 +541,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const beginAreaSelection = () => {
+    plannerDraftRef.current = true;
     setSelection(null);
     resetPlanningState();
     setDrawingMode(true);
@@ -563,6 +570,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   const moveBoundaryCorner = (index: number, nextCoordinate: LatLng) => {
     if (!selection) return;
+    plannerDraftRef.current = true;
     const nextBoundary = selection.boundary.map((point, pointIndex) => (
       pointIndex === index ? nextCoordinate : point
     ));
@@ -642,20 +650,30 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     includePlanningState = true,
   ) => {
     if (!remoteState) return;
+    const preserveLocalPlanning = plannerDraftRef.current && !includePlanningState;
 
-    const nextBaseStation = toLatLngPoint(remoteState.baseStation)
+    const remoteBaseStation = toLatLngPoint(remoteState.baseStation)
       ?? toLatLngPoint(remoteState.remoteBaseStation)
       ?? toLatLngPoint(remoteState.homePoint);
-    const nextBoundary = includePlanningState ? toLatLngPoints(remoteState.boundary).slice(0, 4) : [];
-    const nextPlannedPath = includePlanningState ? toPlannedCoordinates(remoteState.lastPath) : [];
+    const nextBaseStation = preserveLocalPlanning ? baseStationPoint : remoteBaseStation;
+    const nextBoundary = preserveLocalPlanning
+      ? (selection?.boundary ?? [])
+      : (includePlanningState ? toLatLngPoints(remoteState.boundary).slice(0, 4) : []);
+    const nextPlannedPath = preserveLocalPlanning
+      ? plannedPath
+      : (includePlanningState ? toPlannedCoordinates(remoteState.lastPath) : []);
     const nextRobotPoint = toLatLngPoint(remoteState.robot);
     const nextRobotTrail = toLatLngPoints(remoteState.trail);
 
-    setDrawingMode(false);
-    setFirstPoint(null);
-    setPlacingBaseStation(false);
+    if (!preserveLocalPlanning) {
+      setDrawingMode(false);
+      setFirstPoint(null);
+      setPlacingBaseStation(false);
+    }
 
-    setBaseStationPoint(nextBaseStation);
+    if (!preserveLocalPlanning) {
+      setBaseStationPoint(nextBaseStation);
+    }
     if (nextBaseStation) {
       setMapCenter(nextBaseStation);
     }
@@ -668,20 +686,20 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       });
       setAreaSubmitted(true);
       void loadCoverageGrid(true);
-    } else if (includePlanningState) {
+    } else if (includePlanningState && !preserveLocalPlanning) {
       setSelection(null);
       setAreaSubmitted(false);
       setCoverageCells([]);
     }
 
-    if (includePlanningState) {
+    if (includePlanningState && !preserveLocalPlanning) {
       setPlannedPath(nextPlannedPath);
       setPlannedPathDistanceM(computePathDistanceMeters(nextPlannedPath));
     }
     setRobotPoint(nextRobotPoint);
     setRobotTrail(nextRobotTrail);
 
-    if (includePlanningState && nextPlannedPath.length > 1) {
+    if (!preserveLocalPlanning && includePlanningState && nextPlannedPath.length > 1) {
       setMessage(`Saved route loaded: ${nextPlannedPath.length} points over ${(computePathDistanceMeters(nextPlannedPath) / 1000).toFixed(2)} km.`);
     } else if (includePlanningState && nextBoundary.length === 4) {
       setMessage('Saved service area loaded. You can adjust it or build the route again.');
@@ -720,6 +738,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
   useEffect(() => {
     locationPromptedRef.current = false;
+    plannerDraftRef.current = false;
     setPlannerReady(false);
     setSelection(null);
     setPlannedPath([]);
@@ -796,6 +815,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
         cellSizeM,
       });
+      plannerDraftRef.current = false;
       setAreaSubmitted(true);
       const gridLoaded = await loadCoverageGrid(true);
       setMessage(
@@ -863,6 +883,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         longitude: point.lon,
         headingDeg: point.headingDeg ?? null,
       }));
+      plannerDraftRef.current = false;
       setPlannedPath(points);
       const totalDistance = computePathDistanceMeters(points);
       setPlannedPathDistanceM(totalDistance);
@@ -1046,7 +1067,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                       coordinate={point}
                       anchor={{ x: 0.5, y: 0.5 }}
                       flat
-                      tracksViewChanges={false}
+                      tracksViewChanges
                     >
                       <View
                         style={[
