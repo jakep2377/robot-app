@@ -14,7 +14,6 @@ import { getJson, getJsonAllowError, postJson, postText, toWebSocketUrl } from "
 import PercentSlider from "../components/common/PercentSlider";
 import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
-import { JoystickControl, JoystickState } from "../components/common/Joystick";
 
 type AllowedAction = {
   id: string;
@@ -374,12 +373,18 @@ export default function ControllerScreen({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
+  const [manualModeReady, setManualModeReady] = useState(false);
+  const [manualModeSwitching, setManualModeSwitching] = useState(false);
+  const [heldDirection, setHeldDirection] = useState<string | null>(null);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
-  const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
-  const [joystickState, setJoystickState] = useState<JoystickState>(emptyJoystickState);
   const refreshInFlight = useRef(false);
+  const holdRepeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heldCommandRef = useRef<string | null>(null);
+  const manualModeReadyRef = useRef(false);
+  const manualModeSwitchingRef = useRef(false);
+  const manualMotionSendInFlightRef = useRef(false);
 
   const refresh = async () => {
     if (refreshInFlight.current) {
@@ -460,17 +465,146 @@ export default function ControllerScreen({
 
   useEffect(() => {
     return () => {
-      // Cleanup if needed
+      if (holdRepeatTimerRef.current) {
+        clearInterval(holdRepeatTimerRef.current);
+        holdRepeatTimerRef.current = null;
+      }
     };
   }, []);
+
+  const clearManualSessionState = () => {
+    manualModeReadyRef.current = false;
+    manualModeSwitchingRef.current = false;
+    setManualModeReady(false);
+    setManualModeSwitching(false);
+    setHeldDirection(null);
+    heldCommandRef.current = null;
+    if (holdRepeatTimerRef.current) {
+      clearInterval(holdRepeatTimerRef.current);
+      holdRepeatTimerRef.current = null;
+    }
+  };
+
+  const sendImmediateCommand = async (command: string, refreshAfter = false) => {
+    await postText(serverUrl, "/command", command.toUpperCase());
+    setError(null);
+    if (["AUTO", "PAUSE", "ESTOP", "RESET"].includes(command.toUpperCase())) {
+      clearManualSessionState();
+    }
+    if (refreshAfter) {
+      await refresh();
+    }
+  };
+
+  const ensureManualModeReady = async () => {
+    if (manualModeReadyRef.current) {
+      return true;
+    }
+    if (manualModeSwitchingRef.current) {
+      return false;
+    }
+
+    manualModeSwitchingRef.current = true;
+    setManualModeSwitching(true);
+    setPendingAction("MANUAL");
+    try {
+      await sendImmediateCommand("MANUAL", false);
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      manualModeReadyRef.current = true;
+      setManualModeReady(true);
+      return true;
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to enter manual mode");
+      return false;
+    } finally {
+      manualModeSwitchingRef.current = false;
+      setManualModeSwitching(false);
+      setPendingAction((current) => (current === "MANUAL" ? null : current));
+      await refresh();
+    }
+  };
+
+  const sendManualMotionCommand = async (command: string) => {
+    if (manualMotionSendInFlightRef.current) {
+      return;
+    }
+
+    manualMotionSendInFlightRef.current = true;
+    try {
+      await postText(serverUrl, "/command", command.toUpperCase());
+      setError(null);
+    } finally {
+      manualMotionSendInFlightRef.current = false;
+    }
+  };
+
+  const stopHeldMotion = async (sendStop = true) => {
+    if (holdRepeatTimerRef.current) {
+      clearInterval(holdRepeatTimerRef.current);
+      holdRepeatTimerRef.current = null;
+    }
+
+    const hadHeldCommand = heldCommandRef.current;
+    heldCommandRef.current = null;
+    setHeldDirection(null);
+
+    if (!sendStop || (!hadHeldCommand && !manualModeReadyRef.current)) {
+      return;
+    }
+
+    try {
+      await sendManualMotionCommand("STOP");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to stop robot");
+    }
+  };
+
+  const startHeldMotion = async (command: "FORWARD" | "BACKWARD" | "LEFT" | "RIGHT") => {
+    if (heldCommandRef.current === command) {
+      return;
+    }
+
+    await stopHeldMotion(false);
+
+    const manualReady = await ensureManualModeReady();
+    if (!manualReady) {
+      return;
+    }
+
+    heldCommandRef.current = command;
+    setHeldDirection(command);
+
+    try {
+      await sendManualMotionCommand(command);
+    } catch (requestError) {
+      heldCommandRef.current = null;
+      setHeldDirection(null);
+      setError(requestError instanceof Error ? requestError.message : `Unable to send ${command}`);
+      return;
+    }
+
+    holdRepeatTimerRef.current = setInterval(() => {
+      const currentCommand = heldCommandRef.current;
+      if (!currentCommand) {
+        return;
+      }
+      sendManualMotionCommand(currentCommand).catch((requestError) => {
+        setError(requestError instanceof Error ? requestError.message : `Unable to send ${currentCommand}`);
+      });
+    }, 110);
+  };
+
+  const handleManualModalClose = async () => {
+    await stopHeldMotion(true);
+    setManualControlVisible(false);
+    await refresh();
+  };
 
   const performCommand = async (command: string) => {
 
     setPendingAction(command);
     try {
-      await postText(serverUrl, "/command", command.toUpperCase());
-      setError(null);
-      await refresh();
+      await sendImmediateCommand(command, true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : `Command failed: ${command}`);
     } finally {
@@ -1293,18 +1427,107 @@ export default function ControllerScreen({
         </View>
       </Modal>
 
-      <JoystickControl
+      <Modal
         visible={manualControlVisible}
-        serverUrl={serverUrl}
-        missionStateLabel={missionStateLabel}
-        robotOperationalState={formatRobotStateLabel(summary?.robot?.state ?? status?.state ?? "UNKNOWN")}
-        lastCmd={status?.last_cmd ?? summary?.lora?.lastCmd ?? null}
-        onClose={() => setManualControlVisible(false)}
-        joystickState={joystickState}
-        setJoystickState={setJoystickState}
-        onPerformCommand={performCommand}
-        pendingAction={pendingAction}
-      />
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          void handleManualModalClose();
+        }}
+      >
+        <View style={styles.manualBackdrop}>
+          <View style={styles.manualCard}>
+            <View style={styles.manualHeader}>
+              <View style={styles.manualHeaderText}>
+                <Text style={styles.modalTitle}>Manual Buttons</Text>
+                <Text style={styles.modalSubtitle}>
+                  Press and hold to move. Release to send STOP immediately.
+                </Text>
+              </View>
+              <Pressable
+                style={styles.modalCloseButton}
+                onPress={() => {
+                  void handleManualModalClose();
+                }}
+              >
+                <Text style={styles.modalCloseButtonText}>Close</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.manualStatusRow}>
+              <Text style={styles.manualStatusLabel}>Manual radio mode</Text>
+              <Text style={styles.manualStatusValue}>
+                {manualModeSwitching ? "Switching to GFSK..." : manualModeReady ? "Ready (GFSK)" : "Idle (LoRa)"}
+              </Text>
+            </View>
+            <View style={styles.manualStatusRow}>
+              <Text style={styles.manualStatusLabel}>Held command</Text>
+              <Text style={styles.manualStatusValue}>{heldDirection ?? "None"}</Text>
+            </View>
+
+            <View style={styles.manualPad}>
+              <View style={styles.manualPadRow}>
+                <Pressable
+                  style={[styles.manualButton, styles.manualButtonVertical, heldDirection === "FORWARD" ? styles.manualButtonActive : null]}
+                  onPressIn={() => {
+                    void startHeldMotion("FORWARD");
+                  }}
+                  onPressOut={() => {
+                    void stopHeldMotion(true);
+                  }}
+                >
+                  <Text style={styles.manualButtonText}>Forward</Text>
+                </Pressable>
+              </View>
+              <View style={styles.manualPadRow}>
+                <Pressable
+                  style={[styles.manualButton, heldDirection === "LEFT" ? styles.manualButtonActive : null]}
+                  onPressIn={() => {
+                    void startHeldMotion("LEFT");
+                  }}
+                  onPressOut={() => {
+                    void stopHeldMotion(true);
+                  }}
+                >
+                  <Text style={styles.manualButtonText}>Left</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.manualStopButton}
+                  onPress={() => {
+                    void stopHeldMotion(true);
+                  }}
+                >
+                  <Text style={styles.manualButtonText}>Stop</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.manualButton, heldDirection === "RIGHT" ? styles.manualButtonActive : null]}
+                  onPressIn={() => {
+                    void startHeldMotion("RIGHT");
+                  }}
+                  onPressOut={() => {
+                    void stopHeldMotion(true);
+                  }}
+                >
+                  <Text style={styles.manualButtonText}>Right</Text>
+                </Pressable>
+              </View>
+              <View style={styles.manualPadRow}>
+                <Pressable
+                  style={[styles.manualButton, styles.manualButtonVertical, heldDirection === "BACKWARD" ? styles.manualButtonActive : null]}
+                  onPressIn={() => {
+                    void startHeldMotion("BACKWARD");
+                  }}
+                  onPressOut={() => {
+                    void stopHeldMotion(true);
+                  }}
+                >
+                  <Text style={styles.manualButtonText}>Back</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -1737,6 +1960,75 @@ const styles = StyleSheet.create({
   modalCloseButtonText: {
     color: "#16324f",
     fontWeight: "700",
+  },
+  manualBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(10, 19, 32, 0.5)",
+    justifyContent: "center",
+    padding: 20,
+  },
+  manualCard: {
+    backgroundColor: "#ffffff",
+    borderRadius: 24,
+    padding: 20,
+    gap: 16,
+  },
+  manualStatusRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+  },
+  manualStatusLabel: {
+    fontSize: 14,
+    color: "#5d7288",
+    fontWeight: "600",
+  },
+  manualStatusValue: {
+    fontSize: 14,
+    color: "#17324c",
+    fontWeight: "700",
+  },
+  manualPad: {
+    gap: 12,
+    alignItems: "center",
+  },
+  manualPadRow: {
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  manualButton: {
+    minWidth: 96,
+    minHeight: 72,
+    borderRadius: 18,
+    backgroundColor: "#2b6cb0",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+  },
+  manualButtonVertical: {
+    minWidth: 180,
+  },
+  manualStopButton: {
+    minWidth: 96,
+    minHeight: 72,
+    borderRadius: 18,
+    backgroundColor: "#c0392b",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+  },
+  manualButtonActive: {
+    opacity: 0.9,
+  },
+  manualButtonText: {
+    color: "#ffffff",
+    fontWeight: "700",
+    fontSize: 18,
   },
   modalStatusText: {
     fontSize: 12,

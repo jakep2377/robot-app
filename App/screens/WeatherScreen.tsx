@@ -12,14 +12,14 @@ import {
   formatShiftedDayLabel,
   resolveScheduledUnix,
 } from "../lib/weatherScheduling";
-import { buildWorkbookMix, frostRisk, type Mix } from "../lib/treatmentRules";
+import { frostRisk, type Mix } from "../lib/treatmentRules";
 
 type WeatherPayload = {
   name: string;
   dt: number;
   timezone?: number;
   visibility?: number;
-  weather: Array<{ main?: string; description?: string }>;
+  weather: Array<{ id?: number; main?: string; description?: string }>;
   main: { temp: number; feels_like: number; temp_min: number; temp_max: number; pressure: number; humidity: number };
   wind?: { speed?: number; deg?: number; gust?: number };
   clouds?: { all?: number };
@@ -31,7 +31,7 @@ type WeatherPayload = {
 type ForecastPayload = {
   list: Array<{
     dt: number;
-    weather: Array<{ main?: string; description?: string }>;
+    weather: Array<{ id?: number; main?: string; description?: string }>;
     main: { temp: number; humidity: number };
     wind?: { speed?: number; gust?: number };
     rain?: Record<string, number>;
@@ -78,6 +78,16 @@ type NoticeState = {
 const API_KEY = "e324705094164f5dc98161647cccc83a";
 const DEFAULT_LOCATION: LocationState = { latitude: 41.0814, longitude: -81.519, label: "Akron", source: "city" };
 const USE_FAKE_DATA = false;
+// Change this while USE_FAKE_DATA is true to force a specific OpenWeather-representable test case.
+const TEST_CONDITION:
+  | "none"
+  | "frostBlackIce"
+  | "lightSnow"
+  | "moderateHeavySnow"
+  | "freezingRain"
+  | "sleet" = "moderateHeavySnow";
+// Leave as null to use the default temperature hardcoded in the selected fake case.
+const TEST_TEMP_OVERRIDE_F: number | null = 14;
 const clampPct = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
 
 const getPrecipInches = (value?: { rain?: Record<string, number>; snow?: Record<string, number> }) =>
@@ -98,6 +108,174 @@ function getWeatherIconName(condition: string) {
   if (/snow|sleet|ice|freezing/.test(text)) return "weather-snowy";
   if (/mist|fog/.test(text)) return "weather-fog";
   return "weather-partly-cloudy";
+}
+
+type TableEvent = "none" | "lightSnow" | "moderateHeavySnow" | "frostBlackIce" | "freezingRain" | "sleet";
+
+type TableBand = {
+  minTempF: number;
+  maxTempF: number;
+  saltPctFull: number;
+  brinePctFull: number;
+  saltGpm: number;
+  brineLpm: number;
+};
+
+const TABLE_RULES: Record<Exclude<TableEvent, "none">, { label: string; bands: TableBand[] }> = {
+  lightSnow: {
+    label: "Light Snow Storm",
+    bands: [
+      { minTempF: 20, maxTempF: 32, saltPctFull: 63.79, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 125.30, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
+    ],
+  },
+  moderateHeavySnow: {
+    label: "Moderate or Heavy Snow Storm",
+    bands: [
+      { minTempF: 30, maxTempF: 32, saltPctFull: 63.79, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
+      { minTempF: 25, maxTempF: 30, saltPctFull: 110.49, brinePctFull: 117.28, saltGpm: 397.8, brineLpm: 1.642 },
+      { minTempF: 15, maxTempF: 25, saltPctFull: 125.30, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
+    ],
+  },
+  frostBlackIce: {
+    label: "Frost or Black Ice",
+    bands: [
+      { minTempF: 28, maxTempF: 35, saltPctFull: 28.48, brinePctFull: 0.00, saltGpm: 102.5, brineLpm: 0.000 },
+      { minTempF: 20, maxTempF: 28, saltPctFull: 72.90, brinePctFull: 68.23, saltGpm: 262.4, brineLpm: 0.955 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 92.26, brinePctFull: 0.00, saltGpm: 332.1, brineLpm: 0.000 },
+    ],
+  },
+  freezingRain: {
+    label: "Freezing Rain Storm",
+    bands: [
+      { minTempF: 32, maxTempF: 200, saltPctFull: 55.81, brinePctFull: 0.00, saltGpm: 200.9, brineLpm: 0.000 },
+      { minTempF: 20, maxTempF: 32, saltPctFull: 103.65, brinePctFull: 0.00, saltGpm: 373.2, brineLpm: 0.000 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 205.03, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
+    ],
+  },
+  sleet: {
+    label: "Sleet Storm",
+    bands: [
+      { minTempF: 32, maxTempF: 200, saltPctFull: 79.73, brinePctFull: 0.00, saltGpm: 287.0, brineLpm: 0.000 },
+      { minTempF: 28, maxTempF: 32, saltPctFull: 142.38, brinePctFull: 0.00, saltGpm: 512.6, brineLpm: 0.000 },
+      { minTempF: 15, maxTempF: 28, saltPctFull: 205.03, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
+    ],
+  },
+};
+
+function normalizeWeatherText(conditionText: string) {
+  return conditionText.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function inferOpenWeatherEvent(
+  tempF: number,
+  humidity: number,
+  conditionText: string,
+  precipInches: number,
+  primaryWeatherId?: number
+): TableEvent {
+  const text = normalizeWeatherText(conditionText);
+
+  if (primaryWeatherId === 511 || /freezing rain/.test(text)) return "freezingRain";
+
+  if (
+    primaryWeatherId === 611 ||
+    primaryWeatherId === 612 ||
+    primaryWeatherId === 613 ||
+    primaryWeatherId === 615 ||
+    primaryWeatherId === 616 ||
+    /sleet|rain and snow/.test(text)
+  ) {
+    return "sleet";
+  }
+
+  if (
+    (primaryWeatherId != null && ((primaryWeatherId >= 600 && primaryWeatherId <= 602) || (primaryWeatherId >= 620 && primaryWeatherId <= 622))) ||
+    /snow/.test(text)
+  ) {
+    if (
+      primaryWeatherId === 602 ||
+      primaryWeatherId === 621 ||
+      primaryWeatherId === 622 ||
+      /heavy|moderate/.test(text) ||
+      precipInches >= 0.08
+    ) {
+      return "moderateHeavySnow";
+    }
+    return "lightSnow";
+  }
+
+  if (tempF <= 35 && precipInches < 0.01) {
+    const frost = frostRisk(tempF, humidity);
+    if (frost.level === "high" || frost.level === "moderate") return "frostBlackIce";
+  }
+
+  return "none";
+}
+
+function selectTableBand(event: Exclude<TableEvent, "none">, tempF: number) {
+  const bands = TABLE_RULES[event].bands;
+  return bands.find((band) => tempF >= band.minTempF && tempF <= band.maxTempF) ?? null;
+}
+
+function buildOpenWeatherTableMix(
+  tempF: number,
+  humidity: number,
+  conditionText: string,
+  precipInches: number,
+  _windSpeed: number,
+  _windGust: number,
+  primaryWeatherId?: number
+): Mix {
+  const event = inferOpenWeatherEvent(tempF, humidity, conditionText, precipInches, primaryWeatherId);
+
+  if (event === "none") {
+    const frost = frostRisk(tempF, humidity);
+    if (tempF <= 35 && precipInches < 0.01 && frost.level !== "low") {
+      return {
+        saltPct: 0,
+        brinePct: 0,
+        reason: `OpenWeather does not report a direct snow, sleet, or freezing-rain event right now. Frost/ice risk is ${frost.level}, but the workbook does not call for treatment outside the table bands.`,
+      };
+    }
+    return {
+      saltPct: 0,
+      brinePct: 0,
+      reason: "No workbook treatment is recommended for the current OpenWeather condition.",
+    };
+  }
+
+  const band = selectTableBand(event, tempF);
+  const conditionLabel = TABLE_RULES[event].label;
+
+  if (!band) {
+    return {
+      saltPct: 0,
+      brinePct: 0,
+      reason: `${conditionLabel} was detected, but ${Math.round(tempF)}°F is outside the workbook temperature bands for this event, so the recommendation is 0% salt and 0% brine.`,
+    };
+  }
+
+  const rawSaltPct = band.saltPctFull;
+  const rawBrinePct = band.brinePctFull;
+  const saltPct = clampPct(rawSaltPct);
+  const brinePct = clampPct(rawBrinePct);
+  const capped = rawSaltPct > 100 || rawBrinePct > 100;
+
+  const details = [
+    `${conditionLabel}`,
+    `${band.minTempF}–${band.maxTempF}°F band`,
+    `salt ${band.saltGpm.toFixed(1)} g/min`,
+    `brine ${band.brineLpm.toFixed(3)} L/min`,
+  ];
+
+  return {
+    saltPct,
+    brinePct,
+    reason: capped
+      ? `${details.join(" • ")}. Workbook full-output values exceed the controller range, so the app caps them at 100%.`
+      : `${details.join(" • ")}.`,
+  };
 }
 
 function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
@@ -208,8 +386,6 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   };
 
   const loadWeather = async (location: LocationState) => {
-    const TEST_CASE: "none" | "light" | "medium" | "heavy" | "severe" = "heavy";
-
     setLoading(true);
     
     try {
@@ -217,7 +393,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
         const now = Math.floor(Date.now() / 1000);
 
         const fakeCases: Record<
-          "none" | "light" | "medium" | "heavy" | "severe",
+          "none" | "frostBlackIce" | "lightSnow" | "moderateHeavySnow" | "freezingRain" | "sleet",
           { current: WeatherPayload; future: ForecastPayload }
         > = {
           none: {
@@ -226,7 +402,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               dt: now,
               timezone: 0,
               visibility: 16093,
-              weather: [{ main: "Clear", description: "clear sky" }],
+              weather: [{ id: 800, main: "Clear", description: "clear sky" }],
               main: {
                 temp: 45,
                 feels_like: 43,
@@ -247,7 +423,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               list: [
                 {
                   dt: now + 3 * 3600,
-                  weather: [{ main: "Clear", description: "clear sky" }],
+                  weather: [{ id: 800, main: "Clear", description: "clear sky" }],
                   main: { temp: 44, humidity: 52 },
                   wind: { speed: 4, gust: 6 },
                 },
@@ -255,22 +431,22 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
             },
           },
 
-          light: {
+          frostBlackIce: {
             current: {
-              name: "Test Light",
+              name: "Test Frost",
               dt: now,
               timezone: 0,
               visibility: 16093,
-              weather: [{ main: "Clouds", description: "overcast clouds" }],
+              weather: [{ id: 804, main: "Clouds", description: "overcast clouds" }],
               main: {
-                temp: 35,
-                feels_like: 31,
-                temp_min: 33,
-                temp_max: 36,
-                pressure: 1016,
-                humidity: 80,
+                temp: 30,
+                feels_like: 26,
+                temp_min: 29,
+                temp_max: 31,
+                pressure: 1018,
+                humidity: 88,
               },
-              wind: { speed: 6, deg: 270, gust: 9 },
+              wind: { speed: 4, deg: 270, gust: 6 },
               clouds: { all: 95 },
               sys: {
                 sunrise: now - 3600,
@@ -282,21 +458,21 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               list: [
                 {
                   dt: now + 3 * 3600,
-                  weather: [{ main: "Clouds", description: "broken clouds" }],
-                  main: { temp: 34, humidity: 82 },
-                  wind: { speed: 6, gust: 8 },
+                  weather: [{ id: 804, main: "Clouds", description: "overcast clouds" }],
+                  main: { temp: 29, humidity: 90 },
+                  wind: { speed: 3, gust: 5 },
                 },
               ],
             },
           },
 
-          medium: {
+          lightSnow: {
             current: {
-              name: "Test Medium",
+              name: "Test Light Snow",
               dt: now,
               timezone: 0,
               visibility: 12000,
-              weather: [{ main: "Rain", description: "light rain" }],
+              weather: [{ id: 600, main: "Snow", description: "light snow" }],
               main: {
                 temp: 31,
                 feels_like: 27,
@@ -307,7 +483,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               },
               wind: { speed: 8, deg: 270, gust: 12 },
               clouds: { all: 100 },
-              rain: { "1h": 0.08 },
+              snow: { "1h": 0.5 },
               sys: {
                 sunrise: now - 3600,
                 sunset: now + 3600,
@@ -318,22 +494,22 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               list: [
                 {
                   dt: now + 3 * 3600,
-                  weather: [{ main: "Rain", description: "light rain" }],
+                  weather: [{ id: 600, main: "Snow", description: "light snow" }],
                   main: { temp: 30, humidity: 94 },
                   wind: { speed: 9, gust: 13 },
-                  rain: { "3h": 0.2 },
+                  snow: { "3h": 0.9 },
                 },
               ],
             },
           },
 
-          heavy: {
+          moderateHeavySnow: {
             current: {
-              name: "Test Heavy",
+              name: "Test Heavy Snow",
               dt: now,
               timezone: 0,
               visibility: 8000,
-              weather: [{ main: "Snow", description: "moderate snow" }],
+              weather: [{ id: 602, main: "Snow", description: "heavy snow" }],
               main: {
                 temp: 24,
                 feels_like: 18,
@@ -355,7 +531,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               list: [
                 {
                   dt: now + 3 * 3600,
-                  weather: [{ main: "Snow", description: "snow" }],
+                  weather: [{ id: 602, main: "Snow", description: "heavy snow" }],
                   main: { temp: 23, humidity: 91 },
                   wind: { speed: 11, gust: 16 },
                   snow: { "3h": 2.5 },
@@ -364,24 +540,24 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
             },
           },
 
-          severe: {
+          freezingRain: {
             current: {
-              name: "Test Severe",
+              name: "Test Freezing Rain",
               dt: now,
               timezone: 0,
-              visibility: 4000,
-              weather: [{ main: "Snow", description: "heavy snow" }],
+              visibility: 7000,
+              weather: [{ id: 511, main: "Rain", description: "freezing rain" }],
               main: {
-                temp: 12,
-                feels_like: 3,
-                temp_min: 10,
-                temp_max: 13,
-                pressure: 1008,
+                temp: 30,
+                feels_like: 26,
+                temp_min: 29,
+                temp_max: 31,
+                pressure: 1009,
                 humidity: 95,
               },
-              wind: { speed: 22, deg: 270, gust: 30 },
+              wind: { speed: 9, deg: 270, gust: 14 },
               clouds: { all: 100 },
-              snow: { "1h": 3.0 },
+              rain: { "1h": 0.08 },
               sys: {
                 sunrise: now - 3600,
                 sunset: now + 3600,
@@ -392,17 +568,65 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
               list: [
                 {
                   dt: now + 3 * 3600,
-                  weather: [{ main: "Snow", description: "heavy snow" }],
-                  main: { temp: 11, humidity: 96 },
-                  wind: { speed: 24, gust: 32 },
-                  snow: { "3h": 4.5 },
+                  weather: [{ id: 511, main: "Rain", description: "freezing rain" }],
+                  main: { temp: 29, humidity: 96 },
+                  wind: { speed: 10, gust: 15 },
+                  rain: { "3h": 0.18 },
+                },
+              ],
+            },
+          },
+
+          sleet: {
+            current: {
+              name: "Test Sleet",
+              dt: now,
+              timezone: 0,
+              visibility: 7500,
+              weather: [{ id: 611, main: "Snow", description: "sleet" }],
+              main: {
+                temp: 31,
+                feels_like: 27,
+                temp_min: 30,
+                temp_max: 32,
+                pressure: 1010,
+                humidity: 94,
+              },
+              wind: { speed: 8, deg: 270, gust: 12 },
+              clouds: { all: 100 },
+              snow: { "1h": 0.06 },
+              sys: {
+                sunrise: now - 3600,
+                sunset: now + 3600,
+              },
+            },
+            future: {
+              city: { timezone: 0 },
+              list: [
+                {
+                  dt: now + 3 * 3600,
+                  weather: [{ id: 611, main: "Snow", description: "sleet" }],
+                  main: { temp: 30, humidity: 95 },
+                  wind: { speed: 9, gust: 13 },
+                  snow: { "3h": 0.12 },
                 },
               ],
             },
           },
         };
 
-        const selected = fakeCases[TEST_CASE];
+        const selected = fakeCases[TEST_CONDITION];
+
+        if (TEST_TEMP_OVERRIDE_F != null) {
+          selected.current.main.temp = TEST_TEMP_OVERRIDE_F;
+          selected.current.main.temp_min = TEST_TEMP_OVERRIDE_F - 1;
+          selected.current.main.temp_max = TEST_TEMP_OVERRIDE_F + 1;
+          selected.current.main.feels_like = TEST_TEMP_OVERRIDE_F - 3;
+
+          if (selected.future.list[0]) {
+            selected.future.list[0].main.temp = TEST_TEMP_OVERRIDE_F;
+          }
+        }
 
         setWeather(selected.current);
         setForecast(selected.future);
@@ -433,7 +657,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
 
   const currentMix = useMemo(() => {
     if (!weather) return null;
-    return buildWorkbookMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0);
+    return buildOpenWeatherTableMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0, weather.weather?.[0]?.id);
   }, [weather]);
 
   const suggestion = useMemo<ScheduleTarget>(() => {
@@ -444,7 +668,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
       .filter((entry) => entry.dt >= now && entry.dt <= now + 36 * 3600)
       .map((entry) => {
         const condition = `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase();
-        const mix = buildWorkbookMix(entry.main.temp, entry.main.humidity, condition, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0);
+        const mix = buildOpenWeatherTableMix(entry.main.temp, entry.main.humidity, condition, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0, entry.weather?.[0]?.id);
         return { entry, mix, condition, score: scoreForecast(entry.main.temp, condition, entry.main.humidity, getPrecipInches(entry), entry.wind?.speed ?? 0, entry.wind?.gust ?? 0, mix) };
       })
       .sort((a, b) => b.score - a.score || a.entry.dt - b.entry.dt)[0];
@@ -464,13 +688,14 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
 
     forecast.list.forEach((entry) => {
       const condition = entry.weather?.[0]?.description ?? "Forecast update";
-      const mix = buildWorkbookMix(
+      const mix = buildOpenWeatherTableMix(
         entry.main.temp,
         entry.main.humidity,
         `${entry.weather?.[0]?.main ?? ""} ${entry.weather?.[0]?.description ?? ""}`.toLowerCase(),
         getPrecipInches(entry),
         entry.wind?.speed ?? 0,
         entry.wind?.gust ?? 0,
+        entry.weather?.[0]?.id,
       );
       const dayKey = formatShiftedDayKey(entry.dt, timezone);
       const dayLabel = formatShiftedDayLabel(entry.dt, timezone);
@@ -659,7 +884,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     }
 
     const condition = closestEntry.weather?.[0]?.description ?? "forecast update";
-    const mix = buildWorkbookMix(
+    const mix = buildOpenWeatherTableMix(
       closestEntry.main.temp,
       closestEntry.main.humidity,
       `${closestEntry.weather?.[0]?.main ?? ""} ${closestEntry.weather?.[0]?.description ?? ""}`.toLowerCase(),
