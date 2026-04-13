@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { getJson, getJsonAllowError, postJson, postPlainText, postText, toWebSocketUrl } from "../lib/serverApi";
+import { getJson, getJsonAllowError, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
 import PercentSlider from "../components/common/PercentSlider";
 import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
@@ -194,14 +194,11 @@ type StatusPayload = {
   battery?: number;
   state?: string;
   mode?: string;
-  radio_mode?: string | null;
   last_cmd?: string | null;
   last_cmd_id?: string | null;
   last_cmd_status?: string | null;
   last_fault?: unknown;
   queue_depth?: number;
-  base_station_url?: string | null;
-  manual_command_url?: string | null;
   connectivity?: {
     state?: string;
     ready?: boolean;
@@ -610,27 +607,6 @@ export default function ControllerScreen({
       await sendImmediateCommand(command, true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : `Command failed: ${command}`);
-      return false;
-    } finally {
-      setPendingAction(null);
-    }
-  };
-
-  const performDirectManualCommand = async (command: string): Promise<boolean> => {
-    const targetUrl = (status?.manual_command_url ?? status?.base_station_url ?? "").trim();
-    if (!targetUrl) {
-      return performCommand(command);
-    }
-
-    setPendingAction(command);
-    try {
-      await postPlainText(targetUrl, "/command", command.toUpperCase(), 1800);
-      setError(null);
-      await refresh();
-      return true;
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : `Direct command failed: ${command}`);
-      return false;
     } finally {
       setPendingAction(null);
     }
@@ -655,23 +631,6 @@ export default function ControllerScreen({
     } finally {
       setPendingAction(null);
     }
-  };
-
-  const openManualControl = async () => {
-    let ok = await performDirectManualCommand("MANUAL");
-    if (!ok) {
-      await new Promise((resolve) => setTimeout(resolve, 180));
-      ok = await performDirectManualCommand("MANUAL");
-    }
-    if (ok) {
-      setManualControlVisible(true);
-    }
-  };
-
-  const closeManualControl = async () => {
-    // Always close the modal immediately; PAUSE is best-effort in background.
-    setManualControlVisible(false);
-    void performDirectManualCommand("PAUSE");
   };
 
   const submitNote = async () => {
@@ -895,8 +854,6 @@ export default function ControllerScreen({
   const overallConnectionState = connection?.overall?.state ?? status?.connectivity?.state ?? (health?.ready ? "online" : "degraded");
   const backendState = connection?.backend?.state ?? (health?.checks?.db ? "online" : "degraded");
   const baseStationState = connection?.baseStation?.state ?? (health?.checks?.bridge ? "online" : "degraded");
-  const manualCommandUrl = status?.manual_command_url ?? status?.base_station_url ?? null;
-  const radioMode = status?.radio_mode ?? null;
   const robotLinkState = connection?.robot?.state ?? (health?.checks?.telemetry ? "online" : "stale");
   const commandPathState = connection?.commandPath?.state ?? "unknown";
   const missionStateLabel = formatMissionStateLabel(missionState);
@@ -1203,7 +1160,7 @@ export default function ControllerScreen({
         </View>
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Control</Text>
-        <AppButton label="Open Manual Control" onPress={() => void openManualControl()} style={styles.secondaryButton} />
+        <AppButton label="Open Manual Control" onPress={() => setManualControlVisible(true)} style={styles.secondaryButton} />
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -1247,7 +1204,7 @@ export default function ControllerScreen({
           />
           <AppButton
             label="Open Manual Control"
-            onPress={() => void openManualControl()}
+            onPress={() => setManualControlVisible(true)}
             variant="outline"
             style={styles.demoPrimaryButton}
           />
@@ -2015,6 +1972,16 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     padding: 20,
     gap: 16,
+  },
+  manualHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  manualHeaderText: {
+    flex: 1,
+    gap: 4,
   },
   manualStatusRow: {
     flexDirection: "row",
