@@ -339,3 +339,19 @@ export async function postText(serverUrl: string, path: string, body: string) {
   }
   return text;
 }
+
+export async function postPlainText(serverUrl: string, path: string, body: string, timeoutMs = 2500) {
+  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain",
+      ...buildAuthHeaders(),
+    },
+    body,
+  }, timeoutMs);
+  const text = await readBody(response);
+  if (!response.ok) {
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return text;
+}
