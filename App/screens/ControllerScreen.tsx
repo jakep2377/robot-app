@@ -384,9 +384,10 @@ export default function ControllerScreen({
   const refreshInFlight = useRef(false);
 
 
-  const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "http://192.168.4.2";
+  const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "";
 
   const verifyManualGateway = async () => {
+    if (!resolvedManualServerUrl) return false;
     const result = await getJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
     return Boolean(result.ok && result.data && (result.data.ok !== false));
   };
@@ -394,6 +395,10 @@ export default function ControllerScreen({
   const openManualControl = async () => {
     setPendingAction("manual-open");
     try {
+      if (!resolvedManualServerUrl) {
+        setError("Enter the gateway manual URL first. The old fixed 192.168.4.2 address is not valid on most phone hotspots.");
+        return;
+      }
       const ready = await verifyManualGateway();
       if (!ready) {
         setError(`Gateway manual server is not reachable at ${resolvedManualServerUrl}`);

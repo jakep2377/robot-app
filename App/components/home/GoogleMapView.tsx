@@ -436,23 +436,41 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     return normalizeHeadingDeg(angle);
   };
 
+  const headingDeltaDeg = (from: number | null, to: number | null) => {
+    if (from == null || to == null) return null;
+    const raw = Math.abs(from - to) % 360;
+    return raw > 180 ? 360 - raw : raw;
+  };
+
   const buildPathArrowPoints = (points: PlannedCoordinate[]) => {
     if (points.length < 2) return [];
 
     const arrows: PlannedCoordinate[] = [];
-    const stride = points.length > 220 ? 18 : points.length > 140 ? 12 : points.length > 80 ? 8 : 5;
+    const stride = points.length > 220 ? 18 : points.length > 140 ? 12 : points.length > 80 ? 8 : points.length > 30 ? 4 : 2;
+    const halfWindow = Math.max(1, Math.floor(stride / 2));
 
-    for (let i = 2; i < points.length - 2; i += stride) {
-      const startPoint = points[i];
-      const endPoint = points[i + 1];
+    for (let i = stride; i < points.length - stride; i += stride) {
+      const anchorPoint = points[i];
+      const startIndex = Math.max(0, i - halfWindow);
+      const endIndex = Math.min(points.length - 1, i + halfWindow);
+      const prevIndex = Math.max(0, startIndex - 1);
+      const nextIndex = Math.min(points.length - 1, endIndex + 1);
+      const startPoint = points[startIndex];
+      const endPoint = points[endIndex];
       const legLengthM = haversineDistanceMeters(startPoint, endPoint);
       const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint);
+      const prevHeading = computeHeadingBetweenPoints(points[prevIndex], startPoint);
+      const nextHeading = computeHeadingBetweenPoints(endPoint, points[nextIndex]);
+      const turnIntoArrow = headingDeltaDeg(prevHeading, headingDeg);
+      const turnOutOfArrow = headingDeltaDeg(headingDeg, nextHeading);
 
-      if (legLengthM < 1.5 || headingDeg == null) continue;
+      // Skip arrows that would sit on a tight turn or reversal instead of the straight run.
+      if (legLengthM < 0.25 || headingDeg == null) continue;
+      if ((turnIntoArrow != null && turnIntoArrow > 45) || (turnOutOfArrow != null && turnOutOfArrow > 45)) continue;
 
       arrows.push({
-        latitude: (startPoint.latitude + endPoint.latitude) / 2,
-        longitude: (startPoint.longitude + endPoint.longitude) / 2,
+        latitude: anchorPoint.latitude,
+        longitude: anchorPoint.longitude,
         headingDeg,
       });
     }
@@ -1066,6 +1084,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                       key={`path-arrow-${index}`}
                       coordinate={point}
                       anchor={{ x: 0.5, y: 0.5 }}
+                      zIndex={30}
                       flat
                       tracksViewChanges
                     >
