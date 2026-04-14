@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="34" height="46" viewBox="0 0 34 46" role="img" aria-label="Edge corner pin">
+  <defs>
+    <linearGradient id="grad-edge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8b78ff" />
+      <stop offset="100%" stop-color="#5b47c9" />
+    </linearGradient>
+  </defs>
+  <path d="M17 2C9.82 2 4 7.82 4 15c0 8.52 7.86 17.92 11.07 22.04.96 1.23 2.83 1.23 3.79 0C22.14 32.92 30 23.52 30 15 30 7.82 24.18 2 17 2Z" fill="url(#grad-edge)" stroke="#43349a" stroke-width="1.2"/>
+  <circle cx="17" cy="15" r="6.2" fill="#ffffff" fill-opacity="0.96"/>
+</svg>
