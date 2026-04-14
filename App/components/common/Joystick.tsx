@@ -8,7 +8,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { postPlainText, postText, toWebSocketUrl } from "../../lib/serverApi";
+import { postGatewayPlainText, postGatewayText } from "../../lib/serverApi";
 
 export type JoystickState = {
   x: number;
@@ -18,17 +18,19 @@ export type JoystickState = {
   active: boolean;
 };
 
-type ManualTransportMode = "direct-base" | "server-fallback" | "server-only" | "server-live";
+type ManualTransportMode = "direct-gateway";
 
 export const JOYSTICK_PAD_SIZE = 172;
 export const JOYSTICK_KNOB_SIZE = 64;
 export const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
 export const JOYSTICK_DEAD_ZONE = 0.06;
 const JOYSTICK_SEND_MIN_INTERVAL_MS = 40;
-const JOYSTICK_HOLD_REPEAT_MS = 90;
-const HELD_COMMAND_REPEAT_MS = 90;
-const STOP_BURST_COUNT = 3;
+const JOYSTICK_HOLD_REPEAT_MS = 120;
+const HELD_COMMAND_REPEAT_MS = 150;
+const STOP_BURST_COUNT = 1;
 const STOP_BURST_GAP_MS = 45;
+const QUICK_BUTTON_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 };
+const QUICK_BUTTON_PRESS_RETENTION = { top: 28, bottom: 28, left: 28, right: 28 };
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -55,49 +57,43 @@ function computeJoystickValues(locationX: number, locationY: number) {
   return { x, y, turn, drive };
 }
 
-function buildCompactManualPacket(seq: number, drive: number, turn: number) {
-  return `J:${seq},${drive},${turn}`;
+function mapJoystickToManualCommand(drive: number, turn: number): string {
+  if (drive === 0 && turn === 0) {
+    return "STOP";
+  }
+
+  if (Math.abs(drive) >= Math.abs(turn)) {
+    return drive > 0 ? "FORWARD" : "BACKWARD";
+  }
+
+  return turn < 0 ? "LEFT" : "RIGHT";
+}
+
+function buildDriveWireCommand(drive: number, turn: number, sequence: number): string {
+  return `D:${normalizeToPercent(drive)},${normalizeToPercent(turn)},S:${sequence}`;
 }
 
 async function postManualCommand(
-  serverUrl: string,
   targetUrl: string,
   command: string,
-  directToBase: boolean,
-  tryServerSocket?: (command: string) => boolean,
 ): Promise<ManualTransportMode> {
-  if (directToBase) {
-    try {
-      await postPlainText(targetUrl, "/command", command, 1800);
-      return "direct-base";
-    } catch {
-      // Fall back to the server path if the direct base-station path is unavailable.
-    }
-  }
-
-  if (tryServerSocket?.(command)) {
-    return directToBase ? "server-fallback" : "server-live";
-  }
-
-  await postText(serverUrl, "/command", command);
-  return directToBase ? "server-fallback" : "server-only";
+  await postGatewayText(targetUrl, "/command", command);
+  return "direct-gateway";
 }
 
 async function sendDriveCommand(
-  serverUrl: string,
   targetUrl: string,
-  directToBase: boolean,
   drive: number,
   turn: number,
   driveSequenceRef: React.MutableRefObject<number>,
-  lastSentRef: React.MutableRefObject<{ drive: number; turn: number }>,
+  lastSentRef: React.MutableRefObject<string>,
   lastSentAtRef: React.MutableRefObject<number>,
   onTransportMode?: (mode: ManualTransportMode) => void,
-  tryServerSocket?: (command: string) => boolean,
   options?: { force?: boolean },
 ) {
   const force = options?.force === true;
-  if (!force && lastSentRef.current.drive === drive && lastSentRef.current.turn === turn) {
+  const vectorKey = `${drive},${turn}`;
+  if (!force && lastSentRef.current === vectorKey) {
     return;
   }
 
@@ -107,26 +103,16 @@ async function sendDriveCommand(
     return;
   }
 
-  lastSentRef.current = { drive, turn };
+  const nextSequence = driveSequenceRef.current + 1;
+  const command = buildDriveWireCommand(drive, turn, nextSequence);
+
+  lastSentRef.current = vectorKey;
   lastSentAtRef.current = now;
-  driveSequenceRef.current += 1;
-  const seq = driveSequenceRef.current;
-  const directCommand = buildCompactManualPacket(seq, drive, turn);
-  const fallbackCommand = `D:${drive},${turn},S:${seq}`;
+  driveSequenceRef.current = nextSequence;
 
   try {
-    if (directToBase) {
-      try {
-        await postPlainText(targetUrl, "/command", directCommand, 1800);
-        onTransportMode?.("direct-base");
-      } catch {
-        const transport = await postManualCommand(serverUrl, targetUrl, fallbackCommand, directToBase, tryServerSocket);
-        onTransportMode?.(transport);
-      }
-    } else {
-      const transport = await postManualCommand(serverUrl, targetUrl, fallbackCommand, directToBase, tryServerSocket);
-      onTransportMode?.(transport);
-    }
+    await postGatewayPlainText(targetUrl, "/command", command, 1800);
+    onTransportMode?.("direct-gateway");
   } catch {
     // Keep it simple; error handling is handled by the screen.
   }
@@ -147,13 +133,7 @@ type JoystickControlProps = {
   pendingAction: string | null;
 };
 
-const QUICK_DRIVE_COMMANDS: Record<string, { drive: number; turn: number } | null> = {
-  FORWARD: { drive: 100, turn: 0 },
-  BACKWARD: { drive: -100, turn: 0 },
-  LEFT: { drive: 0, turn: -100 },
-  RIGHT: { drive: 0, turn: 100 },
-  STOP: null,
-};
+const QUICK_DIRECTION_COMMANDS = new Set(["FORWARD", "BACKWARD", "LEFT", "RIGHT"]);
 
 export function JoystickControl({
   visible,
@@ -171,15 +151,12 @@ export function JoystickControl({
 }: JoystickControlProps) {
   const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
   const [pressedManualButton, setPressedManualButton] = useState<string | null>(null);
-  const resolvedManualUrl = (manualTargetUrl ?? serverUrl).trim();
-  const useDirectBasePath = Boolean(manualTargetUrl && manualTargetUrl.trim() && manualTargetUrl.trim() !== serverUrl.trim());
-  const [manualTransportMode, setManualTransportMode] = useState<ManualTransportMode>(
-    useDirectBasePath ? "direct-base" : "server-only",
-  );
+  const resolvedManualUrl = (manualTargetUrl ?? "").trim();
+  const gatewayManualReady = resolvedManualUrl.length > 0;
+  const [manualTransportMode, setManualTransportMode] = useState<ManualTransportMode>("direct-gateway");
   const driveSequenceRef = useRef(0);
-  const lastJoystickSent = useRef({ drive: 0, turn: 0 });
+  const lastJoystickSent = useRef("0,0");
   const lastJoystickSentAt = useRef(0);
-  const serverSocketRef = useRef<WebSocket | null>(null);
   const joystickActiveRef = useRef(false);
   const joystickCurrentRef = useRef({ drive: 0, turn: 0 });
   const joystickHoldTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -208,47 +185,19 @@ export function JoystickControl({
   const ensureJoystickHoldLoop = () => {
     if (joystickHoldTimerRef.current) return;
     joystickHoldTimerRef.current = setInterval(() => {
+      if (!gatewayManualReady) return;
       if (!joystickActiveRef.current) return;
       const { drive, turn } = joystickCurrentRef.current;
       if (drive === 0 && turn === 0) return;
-      void sendDriveCommand(serverUrl, resolvedManualUrl, useDirectBasePath, drive, turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, tryServerSocketCommand, { force: true });
+      void sendDriveCommand(resolvedManualUrl, drive, turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, { force: true });
     }, JOYSTICK_HOLD_REPEAT_MS);
   };
 
-  const tryServerSocketCommand = (command: string) => {
-    const socket = serverSocketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-
-    if (command.startsWith("D:")) {
-      const match = command.match(/^D:([-+]?\d+),([-+]?\d+)(?:,S:(\d+))?$/);
-      if (!match) {
-        return false;
-      }
-
-      socket.send(JSON.stringify({
-        event: "manual.drive",
-        payload: {
-          drive: Number(match[1]),
-          turn: Number(match[2]),
-          seq: match[3] ? Number(match[3]) : null,
-        },
-      }));
-      return true;
-    }
-
-    socket.send(JSON.stringify({
-      event: "manual.command",
-      payload: { command },
-    }));
-    return true;
-  };
-
   const sendStopBurst = async () => {
+    if (!gatewayManualReady) return;
     for (let i = 0; i < STOP_BURST_COUNT; i += 1) {
       try {
-        const transport = await postManualCommand(serverUrl, resolvedManualUrl, "STOP", useDirectBasePath);
+        const transport = await postManualCommand(resolvedManualUrl, "STOP");
         setManualTransportMode(transport);
       } catch {
         // Keep trying burst sends to maximize release reliability.
@@ -289,48 +238,15 @@ export function JoystickControl({
     return () => {
       clearJoystickHoldLoop();
       clearHeldCommandLoop();
-      sendDriveCommand(serverUrl, resolvedManualUrl, useDirectBasePath, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, tryServerSocketCommand);
+      if (gatewayManualReady) {
+        void sendDriveCommand(resolvedManualUrl, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode);
+      }
       void sendStopBurst();
     };
-  }, [serverUrl, resolvedManualUrl, useDirectBasePath]);
-
-  useEffect(() => {
-    if (!visible || useDirectBasePath) {
-      if (serverSocketRef.current) {
-        serverSocketRef.current.close();
-        serverSocketRef.current = null;
-      }
-      return;
-    }
-
-    const socket = new WebSocket(toWebSocketUrl(serverUrl));
-    serverSocketRef.current = socket;
-
-    socket.onopen = () => {
-      setManualTransportMode("server-live");
-    };
-
-    socket.onclose = () => {
-      if (serverSocketRef.current === socket) {
-        serverSocketRef.current = null;
-      }
-    };
-
-    socket.onerror = () => {
-      if (serverSocketRef.current === socket) {
-        setManualTransportMode("server-only");
-      }
-    };
-
-    return () => {
-      if (serverSocketRef.current === socket) {
-        serverSocketRef.current = null;
-      }
-      socket.close();
-    };
-  }, [visible, serverUrl, useDirectBasePath]);
+  }, [gatewayManualReady, resolvedManualUrl]);
 
   const updateJoystickFromTouch = async (event: GestureResponderEvent) => {
+    if (!gatewayManualReady) return;
     const { locationX, locationY } = getTouchLocation(event);
     const next = computeJoystickValues(locationX, locationY);
     const active = next.drive !== 0 || next.turn !== 0;
@@ -341,13 +257,15 @@ export function JoystickControl({
     ensureJoystickHoldLoop();
 
     setJoystickState(nextState);
-    sendDriveCommand(serverUrl, resolvedManualUrl, useDirectBasePath, next.drive, next.turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, tryServerSocketCommand);
+    void sendDriveCommand(resolvedManualUrl, next.drive, next.turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode);
   };
 
   const resetJoystick = () => {
     clearJoystickHoldLoop();
     setJoystickState(emptyJoystickState);
-    sendDriveCommand(serverUrl, resolvedManualUrl, useDirectBasePath, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, tryServerSocketCommand);
+    if (gatewayManualReady) {
+      void sendDriveCommand(resolvedManualUrl, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode);
+    }
   };
 
   const joystickResponder = useMemo(
@@ -370,7 +288,7 @@ export function JoystickControl({
           resetJoystick();
         },
       }),
-    [resolvedManualUrl, useDirectBasePath],
+    [gatewayManualReady, resolvedManualUrl],
   );
 
   const beginHeldManualCommand = async (command: string) => {
@@ -379,33 +297,14 @@ export function JoystickControl({
     }
 
     clearHeldCommandLoop();
+    clearJoystickHoldLoop();
     setPressedManualButton(command);
     const normalized = command.toUpperCase();
     heldCommandRef.current = normalized;
-    const quickDrive = QUICK_DRIVE_COMMANDS[normalized];
-
-    if (quickDrive) {
-      joystickActiveRef.current = true;
-      joystickCurrentRef.current = quickDrive;
-      ensureJoystickHoldLoop();
-      void sendDriveCommand(
-        serverUrl,
-        resolvedManualUrl,
-        useDirectBasePath,
-        quickDrive.drive,
-        quickDrive.turn,
-        driveSequenceRef,
-        lastJoystickSent,
-        lastJoystickSentAt,
-        setManualTransportMode,
-        tryServerSocketCommand,
-        { force: true },
-      );
-      return;
-    }
+    setJoystickState(emptyJoystickState);
 
     try {
-      const transport = await postManualCommand(serverUrl, resolvedManualUrl, normalized, useDirectBasePath, tryServerSocketCommand);
+      const transport = await postManualCommand(resolvedManualUrl, normalized);
       setManualTransportMode(transport);
     } catch {
       // Repeat loop keeps command alive while held.
@@ -415,7 +314,7 @@ export function JoystickControl({
       if (heldCommandRef.current !== normalized) {
         return;
       }
-      void postManualCommand(serverUrl, resolvedManualUrl, normalized, useDirectBasePath, tryServerSocketCommand).then((transport) => {
+      void postManualCommand(resolvedManualUrl, normalized).then((transport) => {
         setManualTransportMode(transport);
       }).catch(() => {
         // Ignore transient send failures while button is held.
@@ -423,27 +322,32 @@ export function JoystickControl({
     }, HELD_COMMAND_REPEAT_MS);
   };
 
-  const releaseHeldManualCommand = async () => {
+  const releaseHeldManualCommand = async (options?: { burstStop?: boolean }) => {
+    const releasedCommand = heldCommandRef.current;
     clearHeldCommandLoop();
     clearJoystickHoldLoop();
     setPressedManualButton(null);
     setJoystickState(emptyJoystickState);
-    lastJoystickSent.current = { drive: 0, turn: 0 };
+    lastJoystickSent.current = "0,0";
     lastJoystickSentAt.current = 0;
-    await sendDriveCommand(
-      serverUrl,
-      resolvedManualUrl,
-      useDirectBasePath,
-      0,
-      0,
-      driveSequenceRef,
-      lastJoystickSent,
-      lastJoystickSentAt,
-      setManualTransportMode,
-      tryServerSocketCommand,
-      { force: true },
-    );
-    await sendStopBurst();
+    if (releasedCommand && QUICK_DIRECTION_COMMANDS.has(releasedCommand)) {
+      const transport = await postManualCommand(resolvedManualUrl, "STOP");
+      setManualTransportMode(transport);
+    } else {
+      await sendDriveCommand(
+        resolvedManualUrl,
+        0,
+        0,
+        driveSequenceRef,
+        lastJoystickSent,
+        lastJoystickSentAt,
+        setManualTransportMode,
+        { force: true },
+      );
+    }
+    if (options?.burstStop) {
+      await sendStopBurst();
+    }
   };
 
   const handleClose = async () => {
@@ -455,11 +359,9 @@ export function JoystickControl({
   };
 
   const manualTransportLabel =
-    manualTransportMode === "direct-base"
-      ? "Direct base link"
-      : (manualTransportMode === "server-fallback"
-        ? "Server fallback"
-        : (manualTransportMode === "server-live" ? "Server live" : "Server path"));
+    manualTransportMode === "direct-gateway"
+      ? "Direct gateway link"
+      : (manualTransportMode === "server-live" ? "Server live" : "Server path");
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
@@ -512,7 +414,7 @@ export function JoystickControl({
                 Pos x:{joystickState.x.toFixed(1)} y:{joystickState.y.toFixed(1)} | active:{joystickState.active ? 1 : 0}
               </Text>
               <Text style={styles.joystickDebugText}>
-                Cmd preview D:{joystickState.drive},{joystickState.turn},S:{driveSequenceRef.current + 1}
+                Cmd preview {buildDriveWireCommand(joystickState.drive, joystickState.turn, driveSequenceRef.current + 1)}
               </Text>
               <Text style={styles.joystickDebugText}>
                 Dead-zone {(JOYSTICK_DEAD_ZONE * 100).toFixed(0)}% | Path {manualTransportMode}
@@ -524,6 +426,8 @@ export function JoystickControl({
             <Text style={styles.manualMiniLabel}>Quick buttons</Text>
             <Pressable
               style={[styles.commandButton, pressedManualButton === "FORWARD" ? styles.commandButtonActive : null]}
+              hitSlop={QUICK_BUTTON_HIT_SLOP}
+              pressRetentionOffset={QUICK_BUTTON_PRESS_RETENTION}
               onPressIn={() => {
                 void beginHeldManualCommand("FORWARD");
               }}
@@ -538,6 +442,8 @@ export function JoystickControl({
             <View style={styles.row}>
               <Pressable
                 style={[styles.commandButton, pressedManualButton === "LEFT" ? styles.commandButtonActive : null]}
+                hitSlop={QUICK_BUTTON_HIT_SLOP}
+                pressRetentionOffset={QUICK_BUTTON_PRESS_RETENTION}
                 onPressIn={() => {
                   void beginHeldManualCommand("LEFT");
                 }}
@@ -551,9 +457,11 @@ export function JoystickControl({
               </Pressable>
               <Pressable
                 style={[styles.commandButton, styles.stopButton, pressedManualButton === "STOP" ? styles.stopButtonActive : null]}
+                hitSlop={QUICK_BUTTON_HIT_SLOP}
+                pressRetentionOffset={QUICK_BUTTON_PRESS_RETENTION}
                 onPressIn={() => {
                   setPressedManualButton("STOP");
-                  void releaseHeldManualCommand();
+                  void releaseHeldManualCommand({ burstStop: true });
                 }}
                 onPressOut={() => setPressedManualButton(null)}
               >
@@ -563,6 +471,8 @@ export function JoystickControl({
               </Pressable>
               <Pressable
                 style={[styles.commandButton, pressedManualButton === "RIGHT" ? styles.commandButtonActive : null]}
+                hitSlop={QUICK_BUTTON_HIT_SLOP}
+                pressRetentionOffset={QUICK_BUTTON_PRESS_RETENTION}
                 onPressIn={() => {
                   void beginHeldManualCommand("RIGHT");
                 }}
@@ -577,6 +487,8 @@ export function JoystickControl({
             </View>
             <Pressable
               style={[styles.commandButton, pressedManualButton === "BACKWARD" ? styles.commandButtonActive : null]}
+              hitSlop={QUICK_BUTTON_HIT_SLOP}
+              pressRetentionOffset={QUICK_BUTTON_PRESS_RETENTION}
               onPressIn={() => {
                 void beginHeldManualCommand("BACKWARD");
               }}

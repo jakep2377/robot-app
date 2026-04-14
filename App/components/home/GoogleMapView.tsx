@@ -446,33 +446,43 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     if (points.length < 2) return [];
 
     const arrows: PlannedCoordinate[] = [];
-    const stride = points.length > 220 ? 18 : points.length > 140 ? 12 : points.length > 80 ? 8 : points.length > 30 ? 4 : 2;
-    const halfWindow = Math.max(1, Math.floor(stride / 2));
+    const totalDistanceM = computePathDistanceMeters(points);
+    const spacingM = totalDistanceM > 1800 ? 90 : totalDistanceM > 900 ? 70 : totalDistanceM > 300 ? 45 : 28;
+    const initialSkipM = Math.max(24, spacingM * 0.9);
+    let distanceSinceArrowM = 0;
+    let distanceFromStartM = 0;
 
-    for (let i = stride; i < points.length - stride; i += stride) {
+    for (let i = 1; i < points.length - 1; i += 1) {
+      const prevPoint = points[i - 1];
       const anchorPoint = points[i];
-      const startIndex = Math.max(0, i - halfWindow);
-      const endIndex = Math.min(points.length - 1, i + halfWindow);
-      const prevIndex = Math.max(0, startIndex - 1);
-      const nextIndex = Math.min(points.length - 1, endIndex + 1);
-      const startPoint = points[startIndex];
-      const endPoint = points[endIndex];
+      const nextPoint = points[i + 1];
+      const prevSegLenM = haversineDistanceMeters(prevPoint, anchorPoint);
+      distanceFromStartM += prevSegLenM;
+      distanceSinceArrowM += prevSegLenM;
+
+      if (distanceFromStartM < initialSkipM || distanceSinceArrowM < spacingM) continue;
+
+      const windowStart = Math.max(0, i - 2);
+      const windowEnd = Math.min(points.length - 1, i + 2);
+      const startPoint = points[windowStart];
+      const endPoint = points[windowEnd];
       const legLengthM = haversineDistanceMeters(startPoint, endPoint);
       const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint);
-      const prevHeading = computeHeadingBetweenPoints(points[prevIndex], startPoint);
-      const nextHeading = computeHeadingBetweenPoints(endPoint, points[nextIndex]);
+      const prevHeading = computeHeadingBetweenPoints(points[Math.max(0, windowStart - 1)], startPoint);
+      const nextHeading = computeHeadingBetweenPoints(endPoint, points[Math.min(points.length - 1, windowEnd + 1)]);
       const turnIntoArrow = headingDeltaDeg(prevHeading, headingDeg);
       const turnOutOfArrow = headingDeltaDeg(headingDeg, nextHeading);
 
-      // Skip arrows that would sit on a tight turn or reversal instead of the straight run.
+      // Skip arrows that would sit on a tight turn, reversal, or path start instead of a straight run.
       if (legLengthM < 0.25 || headingDeg == null) continue;
-      if ((turnIntoArrow != null && turnIntoArrow > 45) || (turnOutOfArrow != null && turnOutOfArrow > 45)) continue;
+      if ((turnIntoArrow != null && turnIntoArrow > 38) || (turnOutOfArrow != null && turnOutOfArrow > 38)) continue;
 
       arrows.push({
         latitude: anchorPoint.latitude,
         longitude: anchorPoint.longitude,
         headingDeg,
       });
+      distanceSinceArrowM = 0;
     }
 
     return arrows;
