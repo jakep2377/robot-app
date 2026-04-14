@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -91,6 +91,44 @@ type DemoSpotStatus = {
   reason?: string | null;
 };
 
+type DemoConfig = {
+  laneWidthM?: number;
+  cellSizeM?: number;
+  coverageWidthM?: number;
+  allowWeakGps?: boolean;
+  geofenceToleranceM?: number;
+  minSpotDistanceM?: number;
+  passes?: number;
+  obstaclePolicyEnabled?: boolean;
+  obstacleStopCm?: number;
+  obstacleSidestepCm?: number;
+  obstacleCooldownMs?: number;
+  obstacleSidestepMs?: number;
+};
+
+type DemoReadiness = {
+  missionState?: string;
+  hasStart?: boolean;
+  hasEnd?: boolean;
+  hasPath?: boolean;
+  wpPushState?: string;
+  gpsReady?: boolean;
+  gpsReason?: string | null;
+  readyToPlan?: boolean;
+  readyToRun?: boolean;
+  blockers?: string[];
+};
+
+type DemoObstacleState = {
+  active?: boolean;
+  mode?: string | null;
+  side?: string | null;
+  nearestCm?: number | null;
+  at?: number | null;
+  cooldownUntil?: number | null;
+  note?: string | null;
+};
+
 type SupervisionSummary = {
   mission: {
     id: number;
@@ -117,8 +155,17 @@ type SupervisionSummary = {
   } | null;
   robot: {
     state?: string;
+    heading?: number | null;
     ageMs?: number | null;
     stale?: boolean;
+    motor?: {
+      m1?: number;
+      m2?: number;
+    } | null;
+    prox?: {
+      left?: number | null;
+      right?: number | null;
+    } | null;
   } | null;
   coverage: {
     coveredPct?: number;
@@ -184,6 +231,16 @@ type SupervisionSummary = {
     spotGpsStatus?: {
       start?: DemoSpotStatus | null;
       end?: DemoSpotStatus | null;
+    } | null;
+    config?: DemoConfig | null;
+    obstacle?: DemoObstacleState | null;
+    readiness?: DemoReadiness | null;
+    diagnostics?: {
+      missionState?: string | null;
+      wpPushState?: string | null;
+      loraDegraded?: boolean;
+      loraLastError?: string | null;
+      commandPathState?: string | null;
     } | null;
   } | null;
   alerts: Alert[];
@@ -379,9 +436,19 @@ export default function ControllerScreen({
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
+  const [demoLaneWidthInput, setDemoLaneWidthInput] = useState("3.0");
+  const [demoGeofenceToleranceInput, setDemoGeofenceToleranceInput] = useState("6.0");
+  const [demoMinSpotDistanceInput, setDemoMinSpotDistanceInput] = useState("0.20");
+  const [demoPassesInput, setDemoPassesInput] = useState("1");
+  const [demoObstacleEnabled, setDemoObstacleEnabled] = useState(true);
+  const [demoObstacleStopInput, setDemoObstacleStopInput] = useState("70");
+  const [demoObstacleSidestepInput, setDemoObstacleSidestepInput] = useState("120");
   const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
   const [joystickState, setJoystickState] = useState<JoystickState>(emptyJoystickState);
   const refreshInFlight = useRef(false);
+  const refreshQueued = useRef(false);
+  const isMounted = useRef(true);
+  const demoConfigHydratedRef = useRef(false);
 
 
   const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "";
@@ -438,48 +505,82 @@ export default function ControllerScreen({
     }
   };
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (refreshInFlight.current) {
+      refreshQueued.current = true;
       return;
     }
     refreshInFlight.current = true;
 
     try {
-      const [statusResult, summaryResult, healthResult, testMenuResult] = await Promise.all([
+      const [statusSettled, summarySettled, healthSettled, testMenuSettled] = await Promise.allSettled([
         getJsonAllowError<StatusResponse>(serverUrl, "/status"),
         getJsonAllowError<SummaryResponse>(serverUrl, "/api/supervision/summary"),
         getJsonAllowError<HealthPayload>(serverUrl, "/api/health"),
         getJsonAllowError<TestMenuResponse>(serverUrl, "/api/test-menu"),
       ]);
 
-      if (statusResult.ok && statusResult.data) {
+      if (!isMounted.current) return;
+
+      const statusResult = statusSettled.status === "fulfilled" ? statusSettled.value : null;
+      const summaryResult = summarySettled.status === "fulfilled" ? summarySettled.value : null;
+      const healthResult = healthSettled.status === "fulfilled" ? healthSettled.value : null;
+      const testMenuResult = testMenuSettled.status === "fulfilled" ? testMenuSettled.value : null;
+
+      if (statusResult?.ok && statusResult.data) {
         setStatus(statusResult.data);
       }
-      if (summaryResult.ok && summaryResult.data?.summary) {
+      if (summaryResult?.ok && summaryResult.data?.summary) {
         setSummary(summaryResult.data.summary);
       }
-      setHealth(healthResult.data);
-      if (testMenuResult.ok && testMenuResult.data?.ok) {
+      if (healthResult) {
+        setHealth(healthResult.data);
+      }
+      if (testMenuResult?.ok && testMenuResult.data?.ok) {
         setTestMenu(Array.isArray(testMenuResult.data.tests) ? testMenuResult.data.tests : []);
         setCommandHistory(Array.isArray(testMenuResult.data.commandHistory) ? testMenuResult.data.commandHistory : []);
       }
-      if (statusResult.ok || summaryResult.ok || healthResult.ok || testMenuResult.ok) {
+
+      const anySuccess = Boolean(
+        statusResult?.ok
+        || summaryResult?.ok
+        || healthResult?.ok
+        || testMenuResult?.ok,
+      );
+
+      if (anySuccess) {
         setError(null);
       } else {
         setError("Unable to refresh server state");
       }
     } catch (requestError) {
+      if (!isMounted.current) return;
       setError(requestError instanceof Error ? requestError.message : "Unable to refresh server state");
     } finally {
       refreshInFlight.current = false;
+
+      if (refreshQueued.current && isMounted.current) {
+        refreshQueued.current = false;
+        setTimeout(() => {
+          void refresh();
+        }, 75);
+      }
     }
-  };
+  }, [serverUrl]);
+
+  const requestRefresh = useCallback(() => {
+    if (refreshInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
-    refresh();
-    const timer = setInterval(refresh, 400);
+    requestRefresh();
+    const timer = setInterval(requestRefresh, 1200);
     return () => clearInterval(timer);
-  }, [serverUrl]);
+  }, [requestRefresh]);
 
   useEffect(() => {
     const socket = new WebSocket(toWebSocketUrl(serverUrl));
@@ -511,7 +612,7 @@ export default function ControllerScreen({
           message.event === "ws.test"
         ) {
           setSocketState("live");
-          refresh();
+          requestRefresh();
         }
       } catch {
         setSocketState("polling");
@@ -521,11 +622,25 @@ export default function ControllerScreen({
     return () => {
       socket.close();
     };
-  }, [serverUrl]);
+  }, [serverUrl, requestRefresh]);
 
   useEffect(() => {
+    const cfg = summary?.demo?.config;
+    if (!cfg || demoConfigHydratedRef.current) return;
+    if (typeof cfg.laneWidthM === "number") setDemoLaneWidthInput(cfg.laneWidthM.toFixed(2));
+    if (typeof cfg.geofenceToleranceM === "number") setDemoGeofenceToleranceInput(cfg.geofenceToleranceM.toFixed(2));
+    if (typeof cfg.minSpotDistanceM === "number") setDemoMinSpotDistanceInput(cfg.minSpotDistanceM.toFixed(2));
+    if (typeof cfg.passes === "number") setDemoPassesInput(String(cfg.passes));
+    if (typeof cfg.obstaclePolicyEnabled === "boolean") setDemoObstacleEnabled(cfg.obstaclePolicyEnabled);
+    if (typeof cfg.obstacleStopCm === "number") setDemoObstacleStopInput(String(Math.round(cfg.obstacleStopCm)));
+    if (typeof cfg.obstacleSidestepCm === "number") setDemoObstacleSidestepInput(String(Math.round(cfg.obstacleSidestepCm)));
+    demoConfigHydratedRef.current = true;
+  }, [summary?.demo?.config]);
+
+  useEffect(() => {
+    isMounted.current = true;
     return () => {
-      // Cleanup if needed
+      isMounted.current = false;
     };
   }, []);
 
@@ -622,6 +737,39 @@ export default function ControllerScreen({
     }
   };
 
+  const saveDemoTuning = async () => {
+    setPendingAction("demo-config-save");
+    try {
+      const laneWidthM = Number(demoLaneWidthInput);
+      const geofenceToleranceM = Number(demoGeofenceToleranceInput);
+      const minSpotDistanceM = Number(demoMinSpotDistanceInput);
+      const passes = Number(demoPassesInput);
+      const obstacleStopCm = Number(demoObstacleStopInput);
+      const obstacleSidestepCm = Number(demoObstacleSidestepInput);
+
+      await postJson(serverUrl, "/api/demo-mode", {
+        enabled: demoModeEnabled,
+        source: "app.controller",
+        config: {
+          laneWidthM: Number.isFinite(laneWidthM) && laneWidthM > 0 ? laneWidthM : undefined,
+          geofenceToleranceM: Number.isFinite(geofenceToleranceM) && geofenceToleranceM >= 0 ? geofenceToleranceM : undefined,
+          minSpotDistanceM: Number.isFinite(minSpotDistanceM) && minSpotDistanceM > 0 ? minSpotDistanceM : undefined,
+          passes: Number.isFinite(passes) ? Math.max(1, Math.min(5, Math.round(passes))) : undefined,
+          obstaclePolicyEnabled: demoObstacleEnabled,
+          obstacleStopCm: Number.isFinite(obstacleStopCm) && obstacleStopCm > 0 ? Math.round(obstacleStopCm) : undefined,
+          obstacleSidestepCm: Number.isFinite(obstacleSidestepCm) && obstacleSidestepCm > 0 ? Math.round(obstacleSidestepCm) : undefined,
+        },
+      });
+
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to save demo tuning");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
   const markDemoSpot = async (kind: 'start' | 'end') => {
     setPendingAction(`demo-spot-${kind}`);
     try {
@@ -652,6 +800,23 @@ export default function ControllerScreen({
       await refresh();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to build demo path");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const runDemoPath = async (allowWeakGps = true) => {
+    setPendingAction("demo-run");
+    try {
+      await postJson(serverUrl, "/api/demo-mode/run", {
+        source: "app.controller",
+        allowWeakGps,
+      });
+      setTestResult(null);
+      setError(null);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to run demo path");
     } finally {
       setPendingAction(null);
     }
@@ -830,6 +995,13 @@ export default function ControllerScreen({
   const demoModeEnabled = Boolean(summary?.demo?.enabled);
   const demoSpots = summary?.demo?.spots ?? null;
   const demoSpotGpsStatus = summary?.demo?.spotGpsStatus ?? null;
+  const demoReadiness = summary?.demo?.readiness ?? null;
+  const demoDiagnostics = summary?.demo?.diagnostics ?? null;
+  const demoObstacle = summary?.demo?.obstacle ?? null;
+  const robotMotor = summary?.robot?.motor ?? null;
+  const robotProx = summary?.robot?.prox ?? null;
+  const robotHeading = typeof summary?.robot?.heading === "number" ? summary.robot.heading : null;
+  const demoBlockers = Array.isArray(demoReadiness?.blockers) ? demoReadiness.blockers.filter(Boolean) : [];
   const restoredAt = health?.persistence?.restoredAt ?? null;
   const showRecoveryBanner = Boolean(restoredAt && missionState !== "IDLE");
   const summaryItems = [
@@ -1016,6 +1188,21 @@ export default function ControllerScreen({
         <Text style={[styles.metaText, { color: theme.muted }]}> 
           STM32 {stm32StateLabel} • Last seen {stm32LastSeenLabel}
         </Text>
+        {robotMotor ? (
+          <Text style={[styles.metaText, { color: theme.muted }]}> 
+            Motors M1 {Math.round(Number(robotMotor.m1 ?? 0))} • M2 {Math.round(Number(robotMotor.m2 ?? 0))}
+          </Text>
+        ) : null}
+        {robotHeading !== null ? (
+          <Text style={[styles.metaText, { color: theme.muted }]}> 
+            Heading {robotHeading.toFixed(1)}°
+          </Text>
+        ) : null}
+        {robotProx ? (
+          <Text style={[styles.metaText, { color: theme.muted }]}> 
+            Proximity L {robotProx.left ?? '--'} cm • R {robotProx.right ?? '--'} cm
+          </Text>
+        ) : null}
         {connectionReason ? <Text style={[styles.metaText, { color: theme.muted }]}>{connectionReason}</Text> : null}
       </AppCard>
 
@@ -1182,12 +1369,110 @@ export default function ControllerScreen({
         <AppButton
           label={pendingAction === "demo-path-override" ? "Overriding GPS Check..." : "Build Demo Path (Service Override)"}
           onPress={() => buildDemoPath(true)}
-          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override"}
+          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override" || pendingAction === "demo-run"}
           variant="outline"
           style={styles.demoBuildButton}
         />
+        <AppButton
+          label={pendingAction === "demo-run" ? "Starting Demo Run..." : "Run Demo Path"}
+          onPress={() => runDemoPath(true)}
+          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override" || pendingAction === "demo-run"}
+          variant="success"
+          style={styles.demoBuildButton}
+        />
+        <View style={styles.demoSpotGrid}>
+          <View style={styles.demoSpotCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>Run Readiness</Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>
+              Mission {demoReadiness?.missionState ?? "Unknown"} • Waypoints {demoReadiness?.wpPushState ?? "none"}
+            </Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>
+              {demoReadiness?.readyToRun ? "Ready to run" : "Not ready"}
+            </Text>
+            {demoBlockers.length ? demoBlockers.slice(0, 4).map((reason) => (
+              <Text key={reason} style={styles.error}>{reason}</Text>
+            )) : null}
+          </View>
+          <View style={styles.demoSpotCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>LoRa Diagnostics</Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>
+              Path {demoDiagnostics?.commandPathState ?? "unknown"} • WP {demoDiagnostics?.wpPushState ?? "none"}
+            </Text>
+            <Text style={[styles.metaText, { color: theme.text }]}>
+              LoRa {demoDiagnostics?.loraDegraded ? "degraded" : "ok"}
+            </Text>
+            {demoDiagnostics?.loraLastError ? <Text style={styles.error}>{demoDiagnostics.loraLastError}</Text> : null}
+          </View>
+        </View>
+        <Text style={[styles.quickLabel, { color: theme.muted, marginTop: 8 }]}>Demo Tuning</Text>
+        <View style={styles.opsInputRow}>
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoLaneWidthInput}
+            onChangeText={setDemoLaneWidthInput}
+            placeholder="Lane m"
+            placeholderTextColor={theme.muted}
+          />
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoGeofenceToleranceInput}
+            onChangeText={setDemoGeofenceToleranceInput}
+            placeholder="Fence tol m"
+            placeholderTextColor={theme.muted}
+          />
+        </View>
+        <View style={styles.opsInputRow}>
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoMinSpotDistanceInput}
+            onChangeText={setDemoMinSpotDistanceInput}
+            placeholder="Min spot m"
+            placeholderTextColor={theme.muted}
+          />
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoPassesInput}
+            onChangeText={setDemoPassesInput}
+            placeholder="Passes"
+            placeholderTextColor={theme.muted}
+          />
+        </View>
+        <View style={styles.opsInputRow}>
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoObstacleStopInput}
+            onChangeText={setDemoObstacleStopInput}
+            placeholder="Stop cm"
+            placeholderTextColor={theme.muted}
+          />
+          <TextInput
+            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+            value={demoObstacleSidestepInput}
+            onChangeText={setDemoObstacleSidestepInput}
+            placeholder="Sidestep cm"
+            placeholderTextColor={theme.muted}
+          />
+        </View>
+        <View style={styles.demoButtonRow}>
+          <AppButton
+            label={demoObstacleEnabled ? "Obstacle Policy: ON" : "Obstacle Policy: OFF"}
+            onPress={() => setDemoObstacleEnabled((current) => !current)}
+            variant={demoObstacleEnabled ? "success" : "outline"}
+            style={styles.demoPrimaryButton}
+          />
+          <AppButton
+            label={pendingAction === "demo-config-save" ? "Saving Tuning..." : "Save Demo Tuning"}
+            onPress={saveDemoTuning}
+            disabled={pendingAction === "demo-config-save"}
+            variant="secondary"
+            style={styles.demoPrimaryButton}
+          />
+        </View>
+        {demoObstacle?.active ? (
+          <Text style={[styles.metaText, { color: theme.muted }]}>Obstacle action: {demoObstacle.mode ?? "unknown"}{demoObstacle.side ? ` (${demoObstacle.side})` : ""} • nearest {demoObstacle.nearestCm ?? "--"} cm</Text>
+        ) : null}
         {demoModeEnabled ? (
-          <Text style={[styles.metaText, { color: theme.muted }]}>Demo mode keeps autonomy locked while manual driving and safe stop actions stay available.</Text>
+          <Text style={[styles.metaText, { color: theme.muted }]}>Demo mode keeps standard autonomy buttons locked. Build the demo path, then use Run Demo Path for indoor testing.</Text>
         ) : null}
       </AppCard>
 

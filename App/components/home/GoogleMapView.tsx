@@ -119,6 +119,12 @@ const DEFAULT_MAP_CENTER: LatLng = {
 };
 
 const DEFAULT_PLANNING_MESSAGE = 'Set the base station, then outline the service area.';
+const MAP_THEME = {
+  overlayBg: 'rgba(248,251,255,0.95)',
+  overlayBorder: '#d9e4f0',
+  text: '#16324f',
+  muted: '#35506a',
+};
 
 function normalizeHeadingDeg(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -256,13 +262,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const coverageRefreshAtRef = useRef(0);
   const coverageRequestRef = useRef<Promise<boolean> | null>(null);
   const plannerDraftRef = useRef(false);
-
-  const theme = {
-    overlayBg: 'rgba(248,251,255,0.95)',
-    overlayBorder: '#d9e4f0',
-    text: '#16324f',
-    muted: '#35506a',
-  };
 
   const getLocationModule = () => {
     try {
@@ -447,13 +446,25 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
     const arrows: PlannedCoordinate[] = [];
     const totalDistanceM = computePathDistanceMeters(points);
-    const spacingM = totalDistanceM > 1800 ? 90 : totalDistanceM > 900 ? 70 : totalDistanceM > 300 ? 45 : 28;
-    const initialSkipM = Math.max(24, spacingM * 0.9);
+    const spacingM = totalDistanceM > 1800
+      ? 90
+      : totalDistanceM > 900
+        ? 70
+        : totalDistanceM > 300
+          ? 45
+          : totalDistanceM > 120
+            ? 24
+            : totalDistanceM > 40
+              ? 12
+              : 4;
+    const initialSkipM = totalDistanceM > 80
+      ? Math.max(8, spacingM * 0.45)
+      : Math.min(2, spacingM * 0.35);
     let distanceSinceArrowM = 0;
     let distanceFromStartM = 0;
 
-    for (let i = 1; i < points.length - 1; i += 1) {
-      const prevPoint = points[i - 1];
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const prevPoint = points[Math.max(0, i - 1)];
       const anchorPoint = points[i];
       const nextPoint = points[i + 1];
       const prevSegLenM = haversineDistanceMeters(prevPoint, anchorPoint);
@@ -1116,7 +1127,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </MapView>
       </View>
 
-      <View pointerEvents="box-none" style={[styles.zoomStack, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+      <View pointerEvents="box-none" style={[styles.zoomStack, { backgroundColor: MAP_THEME.overlayBg, borderColor: MAP_THEME.overlayBorder, top: insets.top + 14 }]}> 
         <AppButton
           label="+"
           onPress={() => zoomBy(1)}
@@ -1137,10 +1148,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View pointerEvents="box-none" style={[styles.modeChip, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, top: insets.top + 14 }]}>
+      <View pointerEvents="box-none" style={[styles.modeChip, { backgroundColor: MAP_THEME.overlayBg, borderColor: MAP_THEME.overlayBorder, top: insets.top + 14 }]}> 
         <View style={styles.modeChipTextBlock}>
           <View style={styles.modeChipRow}>
-            <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : theme.muted }]}>
+            <Text style={[styles.modeChipText, { color: drawingMode ? '#1d7f4a' : MAP_THEME.muted }]}> 
               {drawingMode ? 'Drawing' : (selection ? 'Area Set' : 'Browse')}
             </Text>
             <MaterialCommunityIcons
@@ -1149,7 +1160,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               color="#2c6fb7"
             />
           </View>
-          <Text style={[styles.modeChipSub, { color: theme.muted }]} numberOfLines={1}>
+          <Text style={[styles.modeChipSub, { color: MAP_THEME.muted }]} numberOfLines={1}>
             {`Salt ${saltPct}% • Brine ${brinePct}%`}
           </Text>
         </View>
@@ -1164,8 +1175,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         </View>
       </View>
 
-      <View pointerEvents="box-none" style={[styles.overlay, { backgroundColor: theme.overlayBg, borderColor: theme.overlayBorder, bottom: insets.bottom + 14 }]}>
-        <Text style={[styles.overlayText, { color: theme.text }]} numberOfLines={2}>{message}</Text>
+      <View pointerEvents="box-none" style={[styles.overlay, { backgroundColor: MAP_THEME.overlayBg, borderColor: MAP_THEME.overlayBorder, bottom: insets.bottom + 14 }]}> 
+        <Text style={[styles.overlayText, { color: MAP_THEME.text }]} numberOfLines={2}>{message}</Text>
 
         {activeBaseStation ? (
           <View style={styles.baseStationSummaryBlock}>
