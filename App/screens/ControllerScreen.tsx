@@ -1347,7 +1347,8 @@ export default function ControllerScreen({
 
       <JoystickControl
         visible={manualControlVisible}
-        serverUrl={resolvedManualServerUrl}
+        serverUrl={serverUrl}
+        manualTargetUrl={resolvedManualServerUrl}
         missionStateLabel={missionStateLabel}
         robotOperationalState={formatRobotStateLabel(summary?.robot?.state ?? status?.state ?? "UNKNOWN")}
         lastCmd={status?.last_cmd ?? summary?.lora?.lastCmd ?? null}
