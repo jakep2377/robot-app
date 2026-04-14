@@ -119,6 +119,7 @@ const DEFAULT_MAP_CENTER: LatLng = {
 };
 
 const DEFAULT_PLANNING_MESSAGE = 'Set the base station, then outline the service area.';
+const COVERAGE_CELL_SIZE_M = 0.5;
 const MAP_THEME = {
   overlayBg: 'rgba(248,251,255,0.95)',
   overlayBorder: '#d9e4f0',
@@ -418,13 +419,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const resolvePlanningCellSizeM = () => {
-    const { widthM, heightM } = getSelectionMetrics();
-    const narrowSideM = Math.min(widthM, heightM);
-
-    if (narrowSideM > 0 && narrowSideM <= 4) return 0.5;
-    if (narrowSideM > 0 && narrowSideM <= 8) return 0.75;
-    if (narrowSideM > 0 && narrowSideM <= 14) return 1.0;
-    return 2.0;
+    return COVERAGE_CELL_SIZE_M;
   };
 
   const computeHeadingBetweenPoints = (from: LatLng | PlannedCoordinate, to: LatLng | PlannedCoordinate) => {
@@ -441,62 +436,184 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     return raw > 180 ? 360 - raw : raw;
   };
 
-  const buildPathArrowPoints = (points: PlannedCoordinate[]) => {
+  const buildPathArrowPoints = (points: PlannedCoordinate[], areaM2 = 0) => {
     if (points.length < 2) return [];
 
     const arrows: PlannedCoordinate[] = [];
     const totalDistanceM = computePathDistanceMeters(points);
-    const spacingM = totalDistanceM > 1800
-      ? 90
-      : totalDistanceM > 900
-        ? 70
-        : totalDistanceM > 300
-          ? 45
-          : totalDistanceM > 120
-            ? 24
-            : totalDistanceM > 40
-              ? 12
-              : 4;
+    const areaScale = Math.max(0, Math.min(2.5, areaM2 / 2500));
+    const arrowsPer100m = 5.0 + (areaScale * 1.5);
+    const rawSpacingM = Math.max(8, Math.min(20, 100 / arrowsPer100m));
+    const spacingM = Math.max(
+      COVERAGE_CELL_SIZE_M,
+      Math.round(rawSpacingM / COVERAGE_CELL_SIZE_M) * COVERAGE_CELL_SIZE_M,
+    );
     const initialSkipM = totalDistanceM > 80
-      ? Math.max(8, spacingM * 0.45)
-      : Math.min(2, spacingM * 0.35);
-    let distanceSinceArrowM = 0;
-    let distanceFromStartM = 0;
+      ? Math.max(3, spacingM * 0.2)
+      : Math.min(1.2, spacingM * 0.2);
+    const edgeInsetM = Math.min(6, Math.max(1.0, spacingM * 0.18));
+    const minStraightRunM = Math.max(1.2, spacingM * 0.08);
+    const quantizeHeadingDeg = (heading: number) => Math.round(heading / 5) * 5;
 
+    const segments: Array<{
+      from: PlannedCoordinate;
+      to: PlannedCoordinate;
+      startM: number;
+      endM: number;
+      lenM: number;
+      headingDeg: number | null;
+    }> = [];
+
+    let cursorM = 0;
     for (let i = 0; i < points.length - 1; i += 1) {
-      const prevPoint = points[Math.max(0, i - 1)];
-      const anchorPoint = points[i];
-      const nextPoint = points[i + 1];
-      const prevSegLenM = haversineDistanceMeters(prevPoint, anchorPoint);
-      distanceFromStartM += prevSegLenM;
-      distanceSinceArrowM += prevSegLenM;
+      const from = points[i];
+      const to = points[i + 1];
+      const lenM = haversineDistanceMeters(from, to);
+      if (lenM < 0.05) continue;
+      const headingDeg = computeHeadingBetweenPoints(from, to);
+      const startM = cursorM;
+      const endM = startM + lenM;
+      segments.push({ from, to, startM, endM, lenM, headingDeg });
+      cursorM = endM;
+    }
 
-      if (distanceFromStartM < initialSkipM || distanceSinceArrowM < spacingM) continue;
+    if (segments.length === 0) return arrows;
 
-      const windowStart = Math.max(0, i - 2);
-      const windowEnd = Math.min(points.length - 1, i + 2);
-      const startPoint = points[windowStart];
-      const endPoint = points[windowEnd];
-      const legLengthM = haversineDistanceMeters(startPoint, endPoint);
-      const headingDeg = computeHeadingBetweenPoints(startPoint, endPoint);
-      const prevHeading = computeHeadingBetweenPoints(points[Math.max(0, windowStart - 1)], startPoint);
-      const nextHeading = computeHeadingBetweenPoints(endPoint, points[Math.min(points.length - 1, windowEnd + 1)]);
-      const turnIntoArrow = headingDeltaDeg(prevHeading, headingDeg);
-      const turnOutOfArrow = headingDeltaDeg(headingDeg, nextHeading);
+    const runs: Array<{
+      startM: number;
+      endM: number;
+      lenM: number;
+      headingDeg: number;
+    }> = [];
 
-      // Skip arrows that would sit on a tight turn, reversal, or path start instead of a straight run.
-      if (legLengthM < 0.25 || headingDeg == null) continue;
-      if ((turnIntoArrow != null && turnIntoArrow > 38) || (turnOutOfArrow != null && turnOutOfArrow > 38)) continue;
+    for (let i = 0; i < segments.length; i += 1) {
+      const segment = segments[i];
+      if (segment.headingDeg == null) continue;
+      const lastRun = runs[runs.length - 1];
+      if (!lastRun) {
+        runs.push({
+          startM: segment.startM,
+          endM: segment.endM,
+          lenM: segment.lenM,
+          headingDeg: quantizeHeadingDeg(segment.headingDeg),
+        });
+        continue;
+      }
 
-      arrows.push({
-        latitude: anchorPoint.latitude,
-        longitude: anchorPoint.longitude,
-        headingDeg,
+      const headingDiff = headingDeltaDeg(lastRun.headingDeg, segment.headingDeg) ?? 180;
+      if (headingDiff <= 24) {
+        lastRun.endM = segment.endM;
+        lastRun.lenM = lastRun.endM - lastRun.startM;
+        continue;
+      }
+
+      runs.push({
+        startM: segment.startM,
+        endM: segment.endM,
+        lenM: segment.lenM,
+        headingDeg: quantizeHeadingDeg(segment.headingDeg),
       });
-      distanceSinceArrowM = 0;
+    }
+
+    if (runs.length === 0) return arrows;
+
+    const totalUsableDistanceM = segments[segments.length - 1].endM;
+    const clampDistance = (value: number) => Math.max(0, Math.min(totalUsableDistanceM, value));
+
+    const pointAtDistance = (distanceM: number): PlannedCoordinate => {
+      const d = clampDistance(distanceM);
+      for (let i = 0; i < segments.length; i += 1) {
+        const segment = segments[i];
+        if (d > segment.endM && i < segments.length - 1) continue;
+        const local = d - segment.startM;
+        const t = segment.lenM > 0 ? Math.max(0, Math.min(1, local / segment.lenM)) : 0;
+        return {
+          latitude: segment.from.latitude + ((segment.to.latitude - segment.from.latitude) * t),
+          longitude: segment.from.longitude + ((segment.to.longitude - segment.from.longitude) * t),
+          headingDeg: null,
+        };
+      }
+      const last = segments[segments.length - 1].to;
+      return { latitude: last.latitude, longitude: last.longitude, headingDeg: null };
+    };
+
+    const startM = Math.max(initialSkipM, edgeInsetM);
+
+    for (const run of runs) {
+      if (run.endM < startM) continue;
+      if (run.lenM < minStraightRunM) continue;
+
+      const runInsetM = Math.min(edgeInsetM, Math.max(0.6, run.lenM * 0.18));
+      const laneStartM = Math.max(run.startM + runInsetM, startM);
+      const laneEndM = run.endM - runInsetM;
+      const usableLenM = laneEndM - laneStartM;
+      if (usableLenM < 0.8) continue;
+
+      const count = usableLenM <= spacingM
+        ? 1
+        : Math.max(1, Math.floor(usableLenM / spacingM));
+      const slotM = usableLenM / (count + 1);
+
+      for (let i = 1; i <= count; i += 1) {
+        const d = laneStartM + (slotM * i);
+        const point = pointAtDistance(d);
+        arrows.push({
+          latitude: point.latitude,
+          longitude: point.longitude,
+          headingDeg: run.headingDeg,
+        });
+      }
+    }
+
+    if (arrows.length === 0) {
+      const fallbackRun = runs.reduce((best, run) => (run.lenM > best.lenM ? run : best), runs[0]);
+      const fallbackDistanceM = fallbackRun.startM + (fallbackRun.lenM * 0.5);
+      const point = pointAtDistance(fallbackDistanceM);
+      const headingDeg = fallbackRun.headingDeg ?? computeHeadingBetweenPoints(segments[0].from, segments[0].to);
+      if (headingDeg != null) {
+        arrows.push({
+          latitude: point.latitude,
+          longitude: point.longitude,
+          headingDeg,
+        });
+      }
     }
 
     return arrows;
+  };
+
+  const sanitizePlannedPath = (points: PlannedCoordinate[]) => {
+    if (points.length < 2) return points;
+
+    const cleaned: PlannedCoordinate[] = [];
+    for (const point of points) {
+      if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) continue;
+      const prev = cleaned[cleaned.length - 1];
+      if (!prev) {
+        cleaned.push(point);
+        continue;
+      }
+      if (haversineDistanceMeters(prev, point) < 0.15) continue;
+      cleaned.push(point);
+    }
+
+    if (cleaned.length < 4) return cleaned;
+
+    const last = cleaned[cleaned.length - 1];
+    const prev = cleaned[cleaned.length - 2];
+    const prev2 = cleaned[cleaned.length - 3];
+    const tailLenM = haversineDistanceMeters(prev, last);
+    const prevLenM = haversineDistanceMeters(prev2, prev);
+    const tailHeading = computeHeadingBetweenPoints(prev, last);
+    const prevHeading = computeHeadingBetweenPoints(prev2, prev);
+    const tailTurn = headingDeltaDeg(prevHeading, tailHeading) ?? 0;
+
+    // Remove a final spike segment that is much longer than the preceding leg and sharply changes direction.
+    if (tailLenM > Math.max(12, prevLenM * 3.5) && tailTurn > 55) {
+      return cleaned.slice(0, -1);
+    }
+
+    return cleaned;
   };
   const diagonalCross = (base: LatLng, goal: LatLng, point: LatLng) => (
     (goal.longitude - base.longitude) * (point.latitude - base.latitude) -
@@ -700,7 +817,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       : (includePlanningState ? toLatLngPoints(remoteState.boundary).slice(0, 4) : []);
     const nextPlannedPath = preserveLocalPlanning
       ? plannedPath
-      : (includePlanningState ? toPlannedCoordinates(remoteState.lastPath) : []);
+      : (includePlanningState ? sanitizePlannedPath(toPlannedCoordinates(remoteState.lastPath)) : []);
     const nextRobotPoint = toLatLngPoint(remoteState.robot);
     const nextRobotTrail = toLatLngPoints(remoteState.trail);
 
@@ -807,7 +924,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         }
 
         if (message.event === 'path.updated') {
-          const nextPath = toPlannedCoordinates(message.payload?.points);
+          const nextPath = sanitizePlannedPath(toPlannedCoordinates(message.payload?.points));
           setPlannedPath(nextPath);
           setPlannedPathDistanceM(computePathDistanceMeters(nextPath));
           if (nextPath.length > 1) {
@@ -859,7 +976,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       const gridLoaded = await loadCoverageGrid(true);
       setMessage(
         gridLoaded
-          ? `Service area saved at ${cellSizeM.toFixed(cellSizeM < 1 ? 2 : 1)}m grid resolution. You can build the route now.`
+          ? 'Service area saved at 0.5m grid resolution. You can build the route now.'
           : 'Service area saved, but the grid preview is unavailable right now.',
       );
       return true;
@@ -917,11 +1034,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         });
         routeModeLabel = 'travel route';
       }
-      const points = (result?.points ?? []).map((point) => ({
+      const points = sanitizePlannedPath((result?.points ?? []).map((point) => ({
         latitude: point.lat,
         longitude: point.lon,
         headingDeg: point.headingDeg ?? null,
-      }));
+      })));
       plannerDraftRef.current = false;
       setPlannedPath(points);
       const totalDistance = computePathDistanceMeters(points);
@@ -953,8 +1070,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   };
 
   const { widthM, heightM, areaM2 } = getSelectionMetrics();
-  const arrowSize = areaM2 > 4000 ? 34 : areaM2 > 1600 ? 30 : 26;
-  const pathArrowPoints = buildPathArrowPoints(plannedPath);
+  const routeStrokeWidth = areaM2 > 5000 ? 3.4 : areaM2 > 1600 ? 3.0 : 2.6;
+  const routeHaloWidth = routeStrokeWidth + 1.8;
+  const arrowSize = areaM2 > 5000 ? 20 : areaM2 > 1600 ? 17 : 15;
+  const pathArrowPoints = buildPathArrowPoints(plannedPath, areaM2);
   const activeBaseStation = baseStationPoint ?? selection?.baseStation ?? null;
 
   return (
@@ -1091,13 +1210,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   <Polyline
                     coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
                     strokeColor="rgba(255,255,255,0.96)"
-                    strokeWidth={10}
+                    strokeWidth={routeHaloWidth}
                     geodesic
                   />
                   <Polyline
                     coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
                     strokeColor="#6f52ed"
-                    strokeWidth={5}
+                    strokeWidth={routeStrokeWidth}
                     geodesic
                   />
                   {pathArrowPoints.map((point, index) => (
@@ -1116,7 +1235,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                           { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
                         ]}
                       >
-                        <DirectionArrow size={Math.max(18, arrowSize)} color="#6f52ed" />
+                        <DirectionArrow size={Math.max(12, arrowSize - 1)} color="#6f52ed" />
                       </View>
                     </Marker>
                   ))}
@@ -1269,7 +1388,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         {plannedPath.length > 1 ? (
           <Text style={styles.pathMetaText}>
-            Route: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Area {Math.round(areaM2)} m²
+            Route: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Arrows {pathArrowPoints.length} • Area {Math.round(areaM2)} m²
           </Text>
         ) : selection ? (
           <Text style={styles.pathMetaText}>

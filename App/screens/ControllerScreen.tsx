@@ -850,13 +850,44 @@ export default function ControllerScreen({
 
   const groupedTestMenu = useMemo(() => {
     const groups = new Map<string, TestMenuAction[]>();
+
+    const resolveGroupName = (action: TestMenuAction) => {
+      const kind = String(action.kind ?? "").toLowerCase();
+      const sourceGroup = String(action.group ?? "Operations");
+
+      if (kind === "drive" || sourceGroup === "Modes" || sourceGroup === "Drive") {
+        return "LoRa App Commands";
+      }
+      if (kind === "transport") {
+        return "LoRa Transport";
+      }
+      return sourceGroup;
+    };
+
     for (const action of testMenu) {
-      const groupName = action.group ?? "Operations";
+      const groupName = resolveGroupName(action);
       const existing = groups.get(groupName) ?? [];
       existing.push(action);
       groups.set(groupName, existing);
     }
-    return Array.from(groups.entries());
+
+    const preferredOrder = [
+      "LoRa App Commands",
+      "LoRa Transport",
+      "Mission",
+      "Dispersion",
+      "Sensors",
+      "Operations",
+    ];
+
+    return Array.from(groups.entries()).sort((a, b) => {
+      const ai = preferredOrder.indexOf(a[0]);
+      const bi = preferredOrder.indexOf(b[0]);
+      if (ai === -1 && bi === -1) return a[0].localeCompare(b[0]);
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    });
   }, [testMenu]);
 
   const toFriendlyLabel = (value?: string | null, fallback = "Unknown") => {
@@ -1262,6 +1293,7 @@ export default function ControllerScreen({
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Run Controls</Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>Commit the route, then use Start Auto to review checks and begin the run.</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Long paths are committed in local batches capped at 120 waypoints.</Text>
         <View style={styles.missionActionGrid}>
           <ActionButton label="Commit" onPress={() => performAction("push-waypoints")} disabled={!allowedAction("push-waypoints")?.enabled} busy={pendingAction === "push-waypoints"} compact />
           <ActionButton label="Start Auto" onPress={openPreflight} disabled={!allowedAction("mission-start")?.enabled} busy={pendingAction === "mission-start"} compact />
@@ -1406,6 +1438,7 @@ export default function ControllerScreen({
         </View>
         <Text style={[styles.quickLabel, { color: theme.muted, marginTop: 8 }]}>Demo Tuning</Text>
         <View style={styles.opsInputRow}>
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Lane Width (m)</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoLaneWidthInput}
@@ -1413,6 +1446,7 @@ export default function ControllerScreen({
             placeholder="Lane m"
             placeholderTextColor={theme.muted}
           />
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Geofence Tolerance (m)</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoGeofenceToleranceInput}
@@ -1422,6 +1456,7 @@ export default function ControllerScreen({
           />
         </View>
         <View style={styles.opsInputRow}>
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Minimum Spot Distance (m)</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoMinSpotDistanceInput}
@@ -1429,6 +1464,7 @@ export default function ControllerScreen({
             placeholder="Min spot m"
             placeholderTextColor={theme.muted}
           />
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Passes</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoPassesInput}
@@ -1438,6 +1474,7 @@ export default function ControllerScreen({
           />
         </View>
         <View style={styles.opsInputRow}>
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Obstacle Stop Distance (cm)</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoObstacleStopInput}
@@ -1445,6 +1482,7 @@ export default function ControllerScreen({
             placeholder="Stop cm"
             placeholderTextColor={theme.muted}
           />
+          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Obstacle Sidestep Distance (cm)</Text>
           <TextInput
             style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
             value={demoObstacleSidestepInput}
@@ -1477,6 +1515,7 @@ export default function ControllerScreen({
       </AppCard>
 
             <Text style={[styles.metaText, { color: theme.muted }]}>Indoor demo tools are kept here for setup and testing.</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>LoRa app controls are grouped as LoRa App Commands and LoRa Transport below.</Text>
             {groupedTestMenu.length ? groupedTestMenu.map(([groupName, actions]) => (
               <View key={groupName} style={styles.opsGroup}>
                 <Text style={[styles.opsGroupTitle, { color: theme.sectionTitle }]}>{groupName}</Text>
@@ -2237,6 +2276,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     alignItems: "center",
+  },
+  demoInputLabel: {
+    width: 118,
+    fontSize: 11,
+    fontWeight: "600",
   },
   opsInput: {
     flex: 1,
