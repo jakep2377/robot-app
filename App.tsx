@@ -24,6 +24,7 @@ import { configureBaseStationSetup, normalizeBaseStationUrl, normalizeServerUrl,
 
 const Tab = createBottomTabNavigator();
 const DEFAULT_CLOUD_SERVER_URL = 'https://robot-lora-server.onrender.com';
+const DEFAULT_MANUAL_GATEWAY_URL = 'http://172.20.10.2';
 const ENV_LOCAL_SERVER_CANDIDATES = typeof process.env.EXPO_PUBLIC_LOCAL_SERVER_URLS === 'string'
   ? process.env.EXPO_PUBLIC_LOCAL_SERVER_URLS.split(',').map((value) => value.trim()).filter(Boolean)
   : [];
@@ -105,7 +106,7 @@ export default function App() {
     status: 'connecting',
     detail: 'Connecting to the remote server.',
   });
-  const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
+  const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_MANUAL_GATEWAY_URL);
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -128,7 +129,7 @@ export default function App() {
       const result = await discoverBestServer();
       setConnection(result.state);
       setServerUrl(DEFAULT_CLOUD_SERVER_URL);
-      setManualServerUrl(DEFAULT_CLOUD_SERVER_URL);
+      setManualServerUrl(DEFAULT_MANUAL_GATEWAY_URL);
       if (result.state.status === 'error') {
         const probe = result.probes[0];
         setConnectionError(probe?.error ?? 'Unable to reach the hosted server.');
@@ -236,7 +237,7 @@ export default function App() {
     }
 
     setServerUrl(result.serverUrl);
-    setManualServerUrl(result.serverUrl);
+    setManualServerUrl(DEFAULT_MANUAL_GATEWAY_URL);
     setConnection({
       serverUrl: result.serverUrl,
       mode: 'cloud',
@@ -302,6 +303,7 @@ export default function App() {
               {() => (
                 <ControllerScreen
                   serverUrl={serverUrl}
+                  manualServerUrl={manualServerUrl}
                   saltPct={saltPct}
                   brinePct={brinePct}
                   setSaltPct={setSaltPct}
@@ -391,6 +393,7 @@ export default function App() {
               <Text style={styles.modalStatus}>Current connection: {connection.label}</Text>
               <Text style={styles.modalDetail}>{connection.detail}</Text>
               <Text style={styles.modalHintText}>Hosted server: {DEFAULT_CLOUD_SERVER_URL}</Text>
+              <Text style={styles.modalHintText}>Manual gateway: {DEFAULT_MANUAL_GATEWAY_URL}</Text>
 
               {connectionError ? <Text style={styles.errorText}>{connectionError}</Text> : null}
 

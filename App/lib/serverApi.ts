@@ -42,6 +42,16 @@ export function normalizeBaseStationUrl(rawUrl: string) {
   return withProtocol.replace(/\/+$/, "");
 }
 
+export function normalizeGatewayUrl(rawUrl: string) {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return "http://172.20.10.2";
+  }
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  return withProtocol.replace(/\/+$/, "");
+}
+
 export function toWebSocketUrl(serverUrl: string) {
   return normalizeServerUrl(serverUrl).replace(/^http/i, "ws");
 }
@@ -308,6 +318,31 @@ export async function getJsonAllowError<T>(serverUrl: string, path: string): Pro
   };
 }
 
+export async function getGatewayJsonAllowError<T>(gatewayUrl: string, path: string): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
+  const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
+    headers: {
+      ...buildAuthHeaders(),
+    },
+  }, 5000);
+
+  const text = await readBody(response);
+  let data: T | null = null;
+  if (text) {
+    try {
+      data = JSON.parse(text) as T;
+    } catch {
+      data = null;
+    }
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+    raw: text,
+  };
+}
+
 export async function postJson<T>(serverUrl: string, path: string, body: unknown): Promise<T> {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     method: "POST",
@@ -326,6 +361,22 @@ export async function postJson<T>(serverUrl: string, path: string, body: unknown
 
 export async function postText(serverUrl: string, path: string, body: string) {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeaders(),
+    },
+    body: JSON.stringify({ cmd: body }),
+  }, 7000);
+  const text = await readBody(response);
+  if (!response.ok) {
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return text;
+}
+
+export async function postGatewayText(gatewayUrl: string, path: string, body: string) {
+  const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

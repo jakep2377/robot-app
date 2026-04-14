@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { getJson, getJsonAllowError, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
+import { getGatewayJsonAllowError, getJson, getJsonAllowError, postGatewayText, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
 import PercentSlider from "../components/common/PercentSlider";
 import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
@@ -388,7 +388,7 @@ export default function ControllerScreen({
 
   const verifyManualGateway = async () => {
     if (!resolvedManualServerUrl) return false;
-    const result = await getJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
+    const result = await getGatewayJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
     return Boolean(result.ok && result.data && (result.data.ok !== false));
   };
 
@@ -396,7 +396,7 @@ export default function ControllerScreen({
     setPendingAction("manual-open");
     try {
       if (!resolvedManualServerUrl) {
-        setError("Enter the gateway manual URL first. The old fixed 192.168.4.2 address is not valid on most phone hotspots.");
+        setError("Gateway manual URL is not set. Expected default: http://172.20.10.2");
         return;
       }
       const ready = await verifyManualGateway();
@@ -404,7 +404,7 @@ export default function ControllerScreen({
         setError(`Gateway manual server is not reachable at ${resolvedManualServerUrl}`);
         return;
       }
-      await postText(resolvedManualServerUrl, "/command", "MANUAL");
+      await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
       setManualControlVisible(true);
       setError(null);
     } catch (requestError) {
@@ -417,8 +417,8 @@ export default function ControllerScreen({
   const closeManualControl = async () => {
     setManualControlVisible(false);
     try {
-      await postText(resolvedManualServerUrl, "/command", "STOP");
-      await postText(resolvedManualServerUrl, "/command", "PAUSE");
+      await postGatewayText(resolvedManualServerUrl, "/command", "STOP");
+      await postGatewayText(resolvedManualServerUrl, "/command", "PAUSE");
     } catch {
       // best effort safety stop
     }
@@ -427,7 +427,7 @@ export default function ControllerScreen({
   const performManualCommand = async (command: string) => {
     setPendingAction(`manual-${command}`);
     try {
-      await postText(resolvedManualServerUrl, "/command", command.toUpperCase());
+      await postGatewayText(resolvedManualServerUrl, "/command", command.toUpperCase());
       setError(null);
       return true;
     } catch (requestError) {
