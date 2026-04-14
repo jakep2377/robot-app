@@ -24,10 +24,11 @@ export const JOYSTICK_PAD_SIZE = 172;
 export const JOYSTICK_KNOB_SIZE = 64;
 export const JOYSTICK_TRAVEL_RADIUS = (JOYSTICK_PAD_SIZE - JOYSTICK_KNOB_SIZE) / 2;
 export const JOYSTICK_DEAD_ZONE = 0.06;
+const JOYSTICK_MAX_OUTPUT_PERCENT = 100;
 const JOYSTICK_SEND_MIN_INTERVAL_MS = 40;
-const JOYSTICK_HOLD_REPEAT_MS = 120;
+const JOYSTICK_HOLD_REPEAT_MS = 45;
 const HELD_COMMAND_REPEAT_MS = 150;
-const STOP_BURST_COUNT = 1;
+const STOP_BURST_COUNT = 2;
 const STOP_BURST_GAP_MS = 45;
 const QUICK_BUTTON_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 };
 const QUICK_BUTTON_PRESS_RETENTION = { top: 28, bottom: 28, left: 28, right: 28 };
@@ -48,8 +49,8 @@ function computeJoystickValues(locationX: number, locationY: number) {
   const x = rawX * scale;
   const y = rawY * scale;
 
-  const rawTurn = normalizeToPercent((x / JOYSTICK_TRAVEL_RADIUS) * 100);
-  const rawDrive = normalizeToPercent((-y / JOYSTICK_TRAVEL_RADIUS) * 100);
+  const rawTurn = normalizeToPercent((x / JOYSTICK_TRAVEL_RADIUS) * JOYSTICK_MAX_OUTPUT_PERCENT);
+  const rawDrive = normalizeToPercent((-y / JOYSTICK_TRAVEL_RADIUS) * JOYSTICK_MAX_OUTPUT_PERCENT);
 
   const turn = Math.abs(rawTurn) <= JOYSTICK_DEAD_ZONE * 100 ? 0 : rawTurn;
   const drive = Math.abs(rawDrive) <= JOYSTICK_DEAD_ZONE * 100 ? 0 : rawDrive;
@@ -260,11 +261,14 @@ export function JoystickControl({
     void sendDriveCommand(resolvedManualUrl, next.drive, next.turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode);
   };
 
-  const resetJoystick = () => {
+  const resetJoystick = async () => {
     clearJoystickHoldLoop();
     setJoystickState(emptyJoystickState);
+    lastJoystickSent.current = "0,0";
+    lastJoystickSentAt.current = 0;
     if (gatewayManualReady) {
-      void sendDriveCommand(resolvedManualUrl, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode);
+      await sendDriveCommand(resolvedManualUrl, 0, 0, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, { force: true },);
+      await sendStopBurst();
     }
   };
 
@@ -282,10 +286,10 @@ export function JoystickControl({
           void updateJoystickFromTouch(event);
         },
         onPanResponderRelease: () => {
-          resetJoystick();
+          void resetJoystick();
         },
         onPanResponderTerminate: () => {
-          resetJoystick();
+          void resetJoystick();
         },
       }),
     [gatewayManualReady, resolvedManualUrl],
@@ -417,7 +421,7 @@ export function JoystickControl({
                 Cmd preview {buildDriveWireCommand(joystickState.drive, joystickState.turn, driveSequenceRef.current + 1)}
               </Text>
               <Text style={styles.joystickDebugText}>
-                Dead-zone {(JOYSTICK_DEAD_ZONE * 100).toFixed(0)}% | Path {manualTransportMode}
+                Dead-zone {(JOYSTICK_DEAD_ZONE * 100).toFixed(0)}% | Max {JOYSTICK_MAX_OUTPUT_PERCENT}% | Path {manualTransportMode}
               </Text>
             </View>
           </View>

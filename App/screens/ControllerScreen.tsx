@@ -445,21 +445,29 @@ export default function ControllerScreen({
     refreshInFlight.current = true;
 
     try {
-      const [statusData, summaryData, healthResult, testMenuResult] = await Promise.all([
-        getJson<StatusResponse>(serverUrl, "/status"),
-        getJson<SummaryResponse>(serverUrl, "/api/supervision/summary"),
+      const [statusResult, summaryResult, healthResult, testMenuResult] = await Promise.all([
+        getJsonAllowError<StatusResponse>(serverUrl, "/status"),
+        getJsonAllowError<SummaryResponse>(serverUrl, "/api/supervision/summary"),
         getJsonAllowError<HealthPayload>(serverUrl, "/api/health"),
         getJsonAllowError<TestMenuResponse>(serverUrl, "/api/test-menu"),
       ]);
 
-      setStatus(statusData);
-      setSummary(summaryData.summary);
+      if (statusResult.ok && statusResult.data) {
+        setStatus(statusResult.data);
+      }
+      if (summaryResult.ok && summaryResult.data?.summary) {
+        setSummary(summaryResult.data.summary);
+      }
       setHealth(healthResult.data);
       if (testMenuResult.ok && testMenuResult.data?.ok) {
         setTestMenu(Array.isArray(testMenuResult.data.tests) ? testMenuResult.data.tests : []);
         setCommandHistory(Array.isArray(testMenuResult.data.commandHistory) ? testMenuResult.data.commandHistory : []);
       }
-      setError(null);
+      if (statusResult.ok || summaryResult.ok || healthResult.ok || testMenuResult.ok) {
+        setError(null);
+      } else {
+        setError("Unable to refresh server state");
+      }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to refresh server state");
     } finally {
