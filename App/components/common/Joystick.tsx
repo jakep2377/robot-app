@@ -425,7 +425,24 @@ export function JoystickControl({
 
   const releaseHeldManualCommand = async () => {
     clearHeldCommandLoop();
+    clearJoystickHoldLoop();
     setPressedManualButton(null);
+    setJoystickState(emptyJoystickState);
+    lastJoystickSent.current = { drive: 0, turn: 0 };
+    lastJoystickSentAt.current = 0;
+    await sendDriveCommand(
+      serverUrl,
+      resolvedManualUrl,
+      useDirectBasePath,
+      0,
+      0,
+      driveSequenceRef,
+      lastJoystickSent,
+      lastJoystickSentAt,
+      setManualTransportMode,
+      tryServerSocketCommand,
+      { force: true },
+    );
     await sendStopBurst();
   };
 
@@ -534,11 +551,11 @@ export function JoystickControl({
               </Pressable>
               <Pressable
                 style={[styles.commandButton, styles.stopButton, pressedManualButton === "STOP" ? styles.stopButtonActive : null]}
-                onPressIn={() => setPressedManualButton("STOP")}
-                onPressOut={() => setPressedManualButton(null)}
-                onPress={() => {
+                onPressIn={() => {
+                  setPressedManualButton("STOP");
                   void releaseHeldManualCommand();
                 }}
+                onPressOut={() => setPressedManualButton(null)}
               >
                 <Text style={[styles.commandText, pressedManualButton === "STOP" ? styles.commandTextActive : null]}>
                   {pressedManualButton === "STOP" || pendingAction === "STOP" ? "STOP..." : "STOP"}
