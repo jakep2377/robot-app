@@ -509,7 +509,7 @@ export default function ControllerScreen({
     setPendingAction("MANUAL");
     try {
       await sendImmediateCommand("MANUAL", false);
-      await new Promise((resolve) => setTimeout(resolve, 180));
+      await new Promise((resolve) => setTimeout(resolve, 750));
       manualModeReadyRef.current = true;
       setManualModeReady(true);
       return true;

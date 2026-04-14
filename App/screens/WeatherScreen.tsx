@@ -318,9 +318,12 @@ function getNotificationsModule() {
 function describeAutomationStatus(automation: AutomationStatus | null | undefined) {
   const scheduledRunAt = Number(automation?.scheduledRunAt ?? 0) || 0;
   if (automation?.enabled && scheduledRunAt > 0) {
+    const prepSuffix = typeof automation?.lastResult === "string" && automation.lastResult.toLowerCase().includes("waypoint")
+      ? ` ${automation.lastResult}.`
+      : "";
     return {
       armed: true,
-      text: `Auto run armed for ${new Date(scheduledRunAt).toLocaleString()}. The server will launch autonomy when the service window opens if the route is ready.`,
+      text: `Auto run armed for ${new Date(scheduledRunAt).toLocaleString()}. The server will launch autonomy when the service window opens if the route is ready.${prepSuffix}`,
     };
   }
   if (automation?.lastError) {
