@@ -433,6 +433,8 @@ export default function ControllerScreen({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
+  const [manualSaltOn, setManualSaltOn] = useState(false);
+  const [manualBrineOn, setManualBrineOn] = useState(false);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
@@ -452,6 +454,11 @@ export default function ControllerScreen({
 
 
   const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "";
+
+  const clampPercent = (value: number) => {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(100, Math.round(value)));
+  };
 
   const verifyManualGateway = async () => {
     if (!resolvedManualServerUrl) return false;
@@ -484,10 +491,15 @@ export default function ControllerScreen({
   const closeManualControl = async () => {
     setManualControlVisible(false);
     try {
+      await postGatewayText(resolvedManualServerUrl, "/command", "TEST SALT 0");
+      await postGatewayText(resolvedManualServerUrl, "/command", "TEST BRINE 0");
       await postGatewayText(resolvedManualServerUrl, "/command", "STOP");
       await postGatewayText(resolvedManualServerUrl, "/command", "PAUSE");
     } catch {
       // best effort safety stop
+    } finally {
+      setManualSaltOn(false);
+      setManualBrineOn(false);
     }
   };
 
@@ -503,6 +515,24 @@ export default function ControllerScreen({
     } finally {
       setPendingAction(null);
     }
+  };
+
+  const setManualSaltOutput = async (enabled: boolean) => {
+    const pct = enabled ? clampPercent(saltPct) : 0;
+    const ok = await performManualCommand(`TEST SALT ${pct}`);
+    if (ok) {
+      setManualSaltOn(enabled && pct > 0);
+    }
+    return ok;
+  };
+
+  const setManualBrineOutput = async (enabled: boolean) => {
+    const pct = enabled ? clampPercent(brinePct) : 0;
+    const ok = await performManualCommand(`TEST BRINE ${pct}`);
+    if (ok) {
+      setManualBrineOn(enabled && pct > 0);
+    }
+    return ok;
   };
 
   const refresh = useCallback(async () => {
@@ -1311,6 +1341,63 @@ export default function ControllerScreen({
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Control</Text>
         <AppButton label="Open Manual Control" onPress={openManualControl} style={styles.secondaryButton} />
+
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 12 }]}>Manual Material Control</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>
+          Toggle these through the gateway manual link. ON sends the current slider percentage. OFF sends 0%.
+        </Text>
+
+        <View style={styles.manualMaterialSection}>
+          <View style={styles.manualMaterialCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>Salt</Text>
+            <Text style={[styles.manualMaterialValue, { color: theme.text }]}>
+              {manualSaltOn ? `ON • ${clampPercent(saltPct)}%` : "OFF"}
+            </Text>
+            <View style={styles.manualMaterialButtonRow}>
+              <AppButton
+                label={`Salt On (${clampPercent(saltPct)}%)`}
+                onPress={() => setManualSaltOutput(true)}
+                disabled={!manualControlVisible || pendingAction !== null}
+                variant="success"
+                compact
+                style={styles.manualMaterialButton}
+              />
+              <AppButton
+                label="Salt Off"
+                onPress={() => setManualSaltOutput(false)}
+                disabled={!manualControlVisible || pendingAction !== null}
+                variant="secondary"
+                compact
+                style={styles.manualMaterialButton}
+              />
+            </View>
+          </View>
+
+          <View style={styles.manualMaterialCard}>
+            <Text style={[styles.quickLabel, { color: theme.muted }]}>Brine</Text>
+            <Text style={[styles.manualMaterialValue, { color: theme.text }]}>
+              {manualBrineOn ? `ON • ${clampPercent(brinePct)}%` : "OFF"}
+            </Text>
+            <View style={styles.manualMaterialButtonRow}>
+              <AppButton
+                label={`Brine On (${clampPercent(brinePct)}%)`}
+                onPress={() => setManualBrineOutput(true)}
+                disabled={!manualControlVisible || pendingAction !== null}
+                variant="success"
+                compact
+                style={styles.manualMaterialButton}
+              />
+              <AppButton
+                label="Brine Off"
+                onPress={() => setManualBrineOutput(false)}
+                disabled={!manualControlVisible || pendingAction !== null}
+                variant="secondary"
+                compact
+                style={styles.manualMaterialButton}
+              />
+            </View>
+          </View>
+        </View>
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -2307,6 +2394,29 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     color: "#22374d",
+  },
+  manualMaterialSection: {
+    gap: 10,
+    marginTop: 10,
+  },
+  manualMaterialCard: {
+    borderWidth: 1,
+    borderColor: "#e3eaf2",
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: "#fbfcfe",
+    gap: 8,
+  },
+  manualMaterialValue: {
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  manualMaterialButtonRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  manualMaterialButton: {
+    flex: 1,
   },
   noteRow: {
     borderTopWidth: 1,
