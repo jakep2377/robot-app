@@ -433,6 +433,7 @@ export default function ControllerScreen({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
+  const [manualGatewayConnected, setManualGatewayConnected] = useState(false);
   const [manualSaltOn, setManualSaltOn] = useState(false);
   const [manualBrineOn, setManualBrineOn] = useState(false);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
@@ -461,10 +462,49 @@ export default function ControllerScreen({
   };
 
   const verifyManualGateway = async () => {
-    if (!resolvedManualServerUrl) return false;
+    if (!resolvedManualServerUrl) {
+      setManualGatewayConnected(false);
+      return false;
+    }
     const result = await getGatewayJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
-    return Boolean(result.ok && result.data && (result.data.ok !== false));
+    const connected = Boolean(result.ok && result.data && (result.data.ok !== false));
+    setManualGatewayConnected(connected);
+    return connected;
   };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkGateway = async () => {
+      if (!resolvedManualServerUrl) {
+        if (!cancelled) {
+          setManualGatewayConnected(false);
+        }
+        return;
+      }
+
+      try {
+        const result = await getGatewayJsonAllowError<{ ok?: boolean }>(resolvedManualServerUrl, "/status");
+        if (!cancelled) {
+          setManualGatewayConnected(Boolean(result.ok && result.data && (result.data.ok !== false)));
+        }
+      } catch {
+        if (!cancelled) {
+          setManualGatewayConnected(false);
+        }
+      }
+    };
+
+    void checkGateway();
+    const timer = setInterval(() => {
+      void checkGateway();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [resolvedManualServerUrl]);
 
   const openManualControl = async () => {
     setPendingAction("manual-open");
@@ -473,16 +513,17 @@ export default function ControllerScreen({
         setError("Gateway manual URL is not set. Expected default: http://172.20.10.2");
         return;
       }
-      const ready = await verifyManualGateway();
-      if (!ready) {
-        setError(`Gateway manual server is not reachable at ${resolvedManualServerUrl}`);
-        return;
-      }
-      await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
+
       setManualControlVisible(true);
-      setError(null);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to open manual control");
+
+      try {
+        await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
+        setManualGatewayConnected(true);
+        setError(null);
+      } catch (requestError) {
+        setManualGatewayConnected(false);
+        setError(requestError instanceof Error ? requestError.message : "Gateway not connected yet. Manual panel opened anyway.");
+      }
     } finally {
       setPendingAction(null);
     }
@@ -1159,6 +1200,16 @@ export default function ControllerScreen({
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
       <Text style={[styles.title, { color: theme.title }]}>RAIS Controller</Text>
+      <View style={styles.gatewayBannerRow}>
+        <View style={[
+          styles.gatewayBanner,
+          manualGatewayConnected ? styles.gatewayBannerConnected : styles.gatewayBannerDisconnected,
+        ]}>
+          <Text style={styles.gatewayBannerText}>
+            Gateway {manualGatewayConnected ? "Connected" : "Disconnected"}
+          </Text>
+        </View>
+      </View>
       <View style={styles.statusRow}>
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
@@ -1834,6 +1885,32 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     textAlign: 'center',
     marginTop: -2,
+  },
+  gatewayBannerRow: {
+    alignItems: "center",
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  gatewayBanner: {
+    borderRadius: 999,
+    minHeight: 30,
+    minWidth: 170,
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  gatewayBannerConnected: {
+    backgroundColor: "#1a9a5b",
+  },
+  gatewayBannerDisconnected: {
+    backgroundColor: "#b63d3d",
+  },
+  gatewayBannerText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#ffffff",
+    textAlign: "center",
   },
   statusRow: {
     flexDirection: 'row',
