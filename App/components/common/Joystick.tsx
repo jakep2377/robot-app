@@ -41,6 +41,11 @@ function normalizeToPercent(value: number): number {
   return Math.round(clamp(value, -100, 100));
 }
 
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function computeJoystickValues(locationX: number, locationY: number) {
   const rawX = locationX - JOYSTICK_PAD_SIZE / 2;
   const rawY = locationY - JOYSTICK_PAD_SIZE / 2;
@@ -123,7 +128,6 @@ type JoystickControlProps = {
   visible: boolean;
   serverUrl: string;
   manualTargetUrl?: string | null;
-  radioMode?: string | null;
   missionStateLabel: string;
   robotOperationalState: string;
   lastCmd: string | null;
@@ -132,6 +136,8 @@ type JoystickControlProps = {
   setJoystickState: (state: JoystickState) => void;
   onPerformCommand: (command: string) => Promise<boolean>;
   pendingAction: string | null;
+  saltPct: number;
+  brinePct: number;
 };
 
 const QUICK_DIRECTION_COMMANDS = new Set(["FORWARD", "BACKWARD", "LEFT", "RIGHT"]);
@@ -140,7 +146,6 @@ export function JoystickControl({
   visible,
   serverUrl,
   manualTargetUrl,
-  radioMode,
   missionStateLabel,
   robotOperationalState,
   lastCmd,
@@ -149,12 +154,16 @@ export function JoystickControl({
   setJoystickState,
   onPerformCommand,
   pendingAction,
+  saltPct,
+  brinePct,
 }: JoystickControlProps) {
   const emptyJoystickState: JoystickState = { x: 0, y: 0, drive: 0, turn: 0, active: false };
   const [pressedManualButton, setPressedManualButton] = useState<string | null>(null);
   const resolvedManualUrl = (manualTargetUrl ?? "").trim();
   const gatewayManualReady = resolvedManualUrl.length > 0;
   const [manualTransportMode, setManualTransportMode] = useState<ManualTransportMode>("direct-gateway");
+  const [manualSaltOn, setManualSaltOn] = useState(false);
+  const [manualBrineOn, setManualBrineOn] = useState(false);
   const driveSequenceRef = useRef(0);
   const lastJoystickSent = useRef("0,0");
   const lastJoystickSentAt = useRef(0);
@@ -235,6 +244,24 @@ export function JoystickControl({
     return { locationX: boundedX, locationY: boundedY };
   };
 
+  const setManualSaltOutput = async (enabled: boolean) => {
+    const pct = enabled ? clampPercent(saltPct) : 0;
+    const ok = await onPerformCommand(`TEST SALT ${pct}`);
+    if (ok) {
+      setManualSaltOn(enabled && pct > 0);
+    }
+    return ok;
+  };
+
+  const setManualBrineOutput = async (enabled: boolean) => {
+    const pct = enabled ? clampPercent(brinePct) : 0;
+    const ok = await onPerformCommand(`TEST BRINE ${pct}`);
+    if (ok) {
+      setManualBrineOn(enabled && pct > 0);
+    }
+    return ok;
+  };
+
   useEffect(() => {
     return () => {
       clearJoystickHoldLoop();
@@ -245,6 +272,13 @@ export function JoystickControl({
       void sendStopBurst();
     };
   }, [gatewayManualReady, resolvedManualUrl]);
+
+  useEffect(() => {
+    if (!visible) {
+      setManualSaltOn(false);
+      setManualBrineOn(false);
+    }
+  }, [visible]);
 
   const updateJoystickFromTouch = async (event: GestureResponderEvent) => {
     if (!gatewayManualReady) return;
@@ -356,8 +390,12 @@ export function JoystickControl({
 
   const handleClose = async () => {
     clearHeldCommandLoop();
-    resetJoystick();
+    await resetJoystick();
     setPressedManualButton(null);
+    await onPerformCommand("TEST SALT 0");
+    await onPerformCommand("TEST BRINE 0");
+    setManualSaltOn(false);
+    setManualBrineOn(false);
     await sendStopBurst();
     await Promise.resolve(onClose());
   };
@@ -386,11 +424,8 @@ export function JoystickControl({
           <Text style={styles.modalStatusText}>
             Mission {missionStateLabel} | Robot {robotOperationalState} | Cmd {lastCmd ?? "--"}
           </Text>
-          <Text style={styles.modalStatusText}>
-            Radio {radioMode ?? "--"} | Manual path {manualTransportLabel}
-          </Text>
           <Text style={styles.manualHintText}>
-            Slide from center for smoother steering and slower corrections; release anywhere to stop.
+            Slide from center for smooth steering. Release anywhere to stop.
           </Text>
 
           <View style={styles.manualDrivePanel}>
@@ -505,6 +540,61 @@ export function JoystickControl({
               </Text>
             </Pressable>
           </View>
+
+          <View style={styles.materialPanel}>
+            <Text style={styles.manualMiniLabel}>Material controls</Text>
+            <View style={styles.materialRow}>
+              <View style={styles.materialCard}>
+                <View style={styles.materialHeaderRow}>
+                  <Text style={styles.materialTitle}>Salt {clampPercent(saltPct)}%</Text>
+                  <Text style={styles.materialStatus}>{manualSaltOn ? "ON" : "OFF"}</Text>
+                </View>
+                <View style={styles.materialButtonRow}>
+                  <Pressable
+                    style={[styles.materialButton, styles.materialButtonOn, manualSaltOn ? styles.materialButtonOnActive : null]}
+                    onPress={() => {
+                      void setManualSaltOutput(true);
+                    }}
+                  >
+                    <Text style={styles.materialButtonText}>ON</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.materialButton, styles.materialButtonOff, !manualSaltOn ? styles.materialButtonOffActive : null]}
+                    onPress={() => {
+                      void setManualSaltOutput(false);
+                    }}
+                  >
+                    <Text style={styles.materialButtonText}>OFF</Text>
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={styles.materialCard}>
+                <View style={styles.materialHeaderRow}>
+                  <Text style={styles.materialTitle}>Brine {clampPercent(brinePct)}%</Text>
+                  <Text style={styles.materialStatus}>{manualBrineOn ? "ON" : "OFF"}</Text>
+                </View>
+                <View style={styles.materialButtonRow}>
+                  <Pressable
+                    style={[styles.materialButton, styles.materialButtonOn, manualBrineOn ? styles.materialButtonOnActive : null]}
+                    onPress={() => {
+                      void setManualBrineOutput(true);
+                    }}
+                  >
+                    <Text style={styles.materialButtonText}>ON</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.materialButton, styles.materialButtonOff, !manualBrineOn ? styles.materialButtonOffActive : null]}
+                    onPress={() => {
+                      void setManualBrineOutput(false);
+                    }}
+                  >
+                    <Text style={styles.materialButtonText}>OFF</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </View>
         </View>
       </View>
     </Modal>
@@ -521,8 +611,8 @@ const styles = StyleSheet.create({
   modalCard: {
     backgroundColor: "#ffffff",
     borderRadius: 20,
-    padding: 18,
-    gap: 14,
+    padding: 16,
+    gap: 10,
     shadowColor: "#000000",
     shadowOpacity: 0.2,
     shadowRadius: 18,
@@ -540,12 +630,12 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: "800",
     color: "#13233a",
   },
   modalSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: "#63788e",
   },
   modalCloseButton: {
@@ -564,8 +654,8 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
   },
   manualHintText: {
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 11,
+    lineHeight: 15,
     color: "#4f6275",
   },
   manualDrivePanel: {
@@ -645,6 +735,69 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#35506b",
     fontWeight: "600",
+  },
+  materialPanel: {
+    gap: 8,
+  },
+  materialRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  materialCard: {
+    flex: 1,
+    minWidth: 150,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#d6e2ef",
+    backgroundColor: "#f3f7fc",
+    padding: 10,
+    gap: 6,
+  },
+  materialHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  materialTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#16324f",
+  },
+  materialStatus: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#4f6275",
+  },
+  materialButtonRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  materialButton: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  materialButtonOn: {
+    backgroundColor: "#2c6fb7",
+  },
+  materialButtonOff: {
+    backgroundColor: "#7c8794",
+  },
+  materialButtonOnActive: {
+    backgroundColor: "#1f5a97",
+  },
+  materialButtonOffActive: {
+    backgroundColor: "#5d6772",
+  },
+  materialButtonText: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "800",
   },
   dpad: {
     alignItems: "center",
