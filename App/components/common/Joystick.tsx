@@ -32,6 +32,7 @@ const STOP_BURST_COUNT = 2;
 const STOP_BURST_GAP_MS = 45;
 const QUICK_BUTTON_HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 };
 const QUICK_BUTTON_PRESS_RETENTION = { top: 28, bottom: 28, left: 28, right: 28 };
+const JOYSTICK_TOUCH_Y_OFFSET = -22;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -220,11 +221,12 @@ export function JoystickControl({
 
   const measurePad = () => {
     const node = padRef.current;
-    if (!node || !node.measure) {
+    if (!node || !node.measureInWindow) {
       return;
     }
-    node.measure((fx, fy, width, height, px, py) => {
-      padLayout.current = { x: px, y: py, width, height };
+
+    node.measureInWindow((x, y, width, height) => {
+      padLayout.current = { x, y, width, height };
     });
   };
 
@@ -236,7 +238,7 @@ export function JoystickControl({
 
     if (padLayout.current) {
       normalizedX = pageX - padLayout.current.x;
-      normalizedY = pageY - padLayout.current.y;
+      normalizedY = pageY - padLayout.current.y + JOYSTICK_TOUCH_Y_OFFSET;
     }
 
     const boundedX = clamp(normalizedX, 0, JOYSTICK_PAD_SIZE);
@@ -413,7 +415,7 @@ export function JoystickControl({
             <View style={styles.modalHeaderText}>
               <Text style={styles.modalTitle}>Manual / Joystick Control</Text>
               <Text style={styles.modalSubtitle}>
-                Use the thumb pad for finer low-speed control. Exit Manual returns to telemetry/test mode.
+                Use thumb pad for control
               </Text>
             </View>
             <Pressable style={styles.modalCloseButton} onPress={handleClose}>
@@ -425,7 +427,7 @@ export function JoystickControl({
             Mission {missionStateLabel} | Robot {robotOperationalState} | Cmd {lastCmd ?? "--"}
           </Text>
           <Text style={styles.manualHintText}>
-            Slide from center for smooth steering. Release anywhere to stop.
+            Slide to steer • Release to stop
           </Text>
 
           <View style={styles.manualDrivePanel}>
@@ -551,7 +553,12 @@ export function JoystickControl({
                 </View>
                 <View style={styles.materialButtonRow}>
                   <Pressable
-                    style={[styles.materialButton, styles.materialButtonOn, manualSaltOn ? styles.materialButtonOnActive : null]}
+                    style={({ pressed }) => [
+                      styles.materialButton,
+                      styles.materialButtonOn,
+                      manualSaltOn ? styles.materialButtonOnActive : null,
+                      pressed ? styles.materialButtonPressed : null,
+                    ]}
                     onPress={() => {
                       void setManualSaltOutput(true);
                     }}
@@ -559,7 +566,12 @@ export function JoystickControl({
                     <Text style={styles.materialButtonText}>ON</Text>
                   </Pressable>
                   <Pressable
-                    style={[styles.materialButton, styles.materialButtonOff, !manualSaltOn ? styles.materialButtonOffActive : null]}
+                    style={({ pressed }) => [
+                      styles.materialButton,
+                      styles.materialButtonOff,
+                      !manualSaltOn ? styles.materialButtonOffActive : null,
+                      pressed ? styles.materialButtonPressed : null,
+                    ]}
                     onPress={() => {
                       void setManualSaltOutput(false);
                     }}
@@ -576,7 +588,12 @@ export function JoystickControl({
                 </View>
                 <View style={styles.materialButtonRow}>
                   <Pressable
-                    style={[styles.materialButton, styles.materialButtonOn, manualBrineOn ? styles.materialButtonOnActive : null]}
+                    style={({ pressed }) => [
+                      styles.materialButton,
+                      styles.materialButtonOn,
+                      manualBrineOn ? styles.materialButtonOnActive : null,
+                      pressed ? styles.materialButtonPressed : null,
+                    ]}
                     onPress={() => {
                       void setManualBrineOutput(true);
                     }}
@@ -584,7 +601,12 @@ export function JoystickControl({
                     <Text style={styles.materialButtonText}>ON</Text>
                   </Pressable>
                   <Pressable
-                    style={[styles.materialButton, styles.materialButtonOff, !manualBrineOn ? styles.materialButtonOffActive : null]}
+                    style={({ pressed }) => [
+                      styles.materialButton,
+                      styles.materialButtonOff,
+                      !manualBrineOn ? styles.materialButtonOffActive : null,
+                      pressed ? styles.materialButtonPressed : null,
+                    ]}
                     onPress={() => {
                       void setManualBrineOutput(false);
                     }}
@@ -793,6 +815,14 @@ const styles = StyleSheet.create({
   },
   materialButtonOffActive: {
     backgroundColor: "#5d6772",
+  },
+  materialButtonPressed: {
+    transform: [{ scale: 0.97 }],
+    shadowColor: "#14324f",
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   materialButtonText: {
     color: "#ffffff",
