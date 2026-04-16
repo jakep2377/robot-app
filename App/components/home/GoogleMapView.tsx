@@ -129,6 +129,9 @@ const MAP_THEME = {
   text: '#16324f',
   muted: '#35506a',
 };
+const MAX_ROBOT_TRAIL_POINTS = 240;
+const MAX_ROBOT_JUMP_METERS = 35;
+const MIN_ROBOT_POINT_SEPARATION_M = 0.25;
 
 function normalizeHeadingDeg(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -142,6 +145,8 @@ function toLatLngPoint(point: unknown): LatLng | null {
   const latitude = Number(candidate.lat ?? candidate.latitude);
   const longitude = Number(candidate.lon ?? candidate.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  if (Math.abs(latitude) < 0.0001 && Math.abs(longitude) < 0.0001) return null;
   return { latitude, longitude };
 }
 
@@ -268,6 +273,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const coverageRefreshAtRef = useRef(0);
   const coverageRequestRef = useRef<Promise<boolean> | null>(null);
   const plannerDraftRef = useRef(false);
+  const robotPointRef = useRef<LatLng | null>(planningCache.robotPoint);
 
   const getLocationModule = () => {
     try {
@@ -374,6 +380,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     };
   }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedArrows, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType, robotPoint, robotTrail]);
 
+  useEffect(() => {
+    robotPointRef.current = robotPoint;
+  }, [robotPoint]);
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
     const earthRadiusM = 6371000;
@@ -778,15 +787,29 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     }
   };
 
-  const appendRobotTrailPoint = (coordinate: LatLng) => {
-    setRobotTrail((current) => {
-      const lastPoint = current[current.length - 1];
-      if (lastPoint && haversineDistanceMeters(lastPoint, coordinate) < 0.25) {
-        return current;
+  const sanitizeRobotTrail = (points: LatLng[]) => {
+    if (points.length === 0) return [];
+    const filtered: LatLng[] = [];
+    for (const point of points) {
+      const lastPoint = filtered[filtered.length - 1];
+      if (!lastPoint) {
+        filtered.push(point);
+        continue;
       }
-      const nextTrail = [...current, coordinate];
-      return nextTrail.slice(-240);
-    });
+      const jumpMeters = haversineDistanceMeters(lastPoint, point);
+      if (jumpMeters < MIN_ROBOT_POINT_SEPARATION_M) {
+        continue;
+      }
+      if (jumpMeters > MAX_ROBOT_JUMP_METERS) {
+        continue;
+      }
+      filtered.push(point);
+    }
+    return filtered.slice(-MAX_ROBOT_TRAIL_POINTS);
+  };
+
+  const appendRobotTrailPoint = (coordinate: LatLng) => {
+    setRobotTrail((current) => sanitizeRobotTrail([...current, coordinate]));
   };
 
   const applyRemotePlannerState = async (
@@ -818,7 +841,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           ? toPlannedCoordinates(remoteState.lastArrows)
           : []);
     const nextRobotPoint = toLatLngPoint(remoteState.robot);
-    const nextRobotTrail = toLatLngPoints(remoteState.trail);
+    const nextRobotTrail = sanitizeRobotTrail(toLatLngPoints(remoteState.trail));
 
     if (!preserveLocalPlanning) {
       setDrawingMode(false);
@@ -904,6 +927,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setAreaSubmitted(false);
     setDrawingMode(false);
     setFirstPoint(null);
+    setRobotPoint(null);
+    setRobotTrail([]);
     void refreshPlannerState(true, false);
   }, [serverUrl]);
 
@@ -940,8 +965,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         if (message.event === 'telemetry.updated') {
           const nextRobotPoint = toLatLngPoint(message.payload?.robot);
           if (nextRobotPoint) {
-            setRobotPoint(nextRobotPoint);
-            appendRobotTrailPoint(nextRobotPoint);
+            const lastPoint = robotPointRef.current;
+            const jumpMeters = lastPoint ? haversineDistanceMeters(lastPoint, nextRobotPoint) : 0;
+            if (!lastPoint || jumpMeters <= MAX_ROBOT_JUMP_METERS) {
+              setRobotPoint(nextRobotPoint);
+              appendRobotTrailPoint(nextRobotPoint);
+            }
           }
           void loadCoverageGrid(false);
         }

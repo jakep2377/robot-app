@@ -119,6 +119,30 @@ type DemoReadiness = {
   blockers?: string[];
 };
 
+type DemoPathPoint = {
+  lat: number;
+  lon: number;
+  salt?: number;
+  brine?: number;
+};
+
+type DemoPathBuildResponse = {
+  warnings?: string[];
+  waypointPush?: {
+    ok?: boolean;
+    error?: string | null;
+    sent?: number;
+    queuedRemote?: boolean;
+    truncated?: boolean;
+    totalPoints?: number;
+  } | null;
+  path?: {
+    mode?: string;
+    pointCount?: number;
+    points?: DemoPathPoint[];
+  } | null;
+};
+
 type DemoObstacleState = {
   active?: boolean;
   mode?: string | null;
@@ -255,6 +279,7 @@ type StatusPayload = {
   last_cmd?: string | null;
   last_cmd_id?: string | null;
   last_cmd_status?: string | null;
+  manual_command_url?: string | null;
   last_fault?: unknown;
   queue_depth?: number;
   connectivity?: {
@@ -466,15 +491,118 @@ export default function ControllerScreen({
   const refreshQueued = useRef(false);
   const isMounted = useRef(true);
   const demoConfigHydratedRef = useRef(false);
+  const [demoPathPoints, setDemoPathPoints] = useState<DemoPathPoint[]>([]);
 
-
-  const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "";
+  const resolvedManualServerUrl = ((status?.manual_command_url && status.manual_command_url.trim()) || (manualServerUrl && manualServerUrl.trim()) || "");
   const serverReachable = connectionStatus === "connected" || connectionStatus === "fallback";
+  const directGatewayPreferred = Boolean(resolvedManualServerUrl) && summary?.demo?.enabled === true;
+
+  const delayMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const formatWaypointCoord = (value: number) => {
+    if (!Number.isFinite(value)) return "0";
+    const text = value.toFixed(5).replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "");
+    return text === "-0" ? "0" : text;
+  };
+
+  const buildGatewayWaypointCommands = (points: DemoPathPoint[]) => {
+    const commands = ["PAUSE", "WPCLEAR"];
+
+    points.forEach((point, index) => {
+      const salt = Math.max(0, Math.min(100, Math.round(Number(point?.salt ?? saltPct))));
+      const brine = Math.max(0, Math.min(100, Math.round(Number(point?.brine ?? brinePct))));
+      const entry = `${formatWaypointCoord(Number(point.lat))},${formatWaypointCoord(Number(point.lon))},${salt},${brine}`;
+      commands.push(`WP:${index}:${entry}`);
+    });
+
+    commands.push(`WPLOAD:${points.length}`);
+    return commands;
+  };
 
   const verifyManualGateway = async () => {
     if (!resolvedManualServerUrl) return false;
     const result = await getGatewayJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
     return Boolean(result.ok && result.data && (result.data.ok !== false));
+  };
+
+  const relayWaypointsToGateway = async (points: DemoPathPoint[]) => {
+    if (!resolvedManualServerUrl) {
+      throw new Error("Gateway URL is not set on this device.");
+    }
+
+    const gatewayOk = await verifyManualGateway();
+    if (!gatewayOk) {
+      throw new Error("The phone cannot reach the gateway over Wi-Fi.");
+    }
+
+    const sanitized = points.filter((point) => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lon)));
+    if (sanitized.length < 2) {
+      throw new Error("Build the demo path first so the phone has waypoints to send.");
+    }
+
+    const commands = buildGatewayWaypointCommands(sanitized);
+    for (let index = 0; index < commands.length; index += 1) {
+      await postGatewayText(resolvedManualServerUrl, "/command", commands[index], 5000);
+      if (index < commands.length - 1) {
+        await delayMs(2);
+      }
+    }
+
+    return { pointCount: sanitized.length, commandCount: commands.length };
+  };
+
+  const runDemoDirectToGateway = async (points: DemoPathPoint[]) => {
+    const relay = await relayWaypointsToGateway(points);
+    await delayMs(10);
+    await postGatewayText(resolvedManualServerUrl, "/command", "DEMOON", 5000);
+    await delayMs(10);
+    await postGatewayText(resolvedManualServerUrl, "/command", "AUTO", 5000);
+    return relay;
+  };
+
+  const resolveGatewayActionCommand = (actionId: string) => {
+    switch (actionId) {
+      case "mission-start":
+      case "mission-resume":
+        return "AUTO";
+      case "mission-pause":
+      case "mission-complete":
+        return "PAUSE";
+      case "mission-abort":
+        return "ESTOP";
+      case "command-reset":
+        return "RESET";
+      default:
+        return null;
+    }
+  };
+
+  const resolveGatewayTestMenuCommand = (action: TestMenuAction) => {
+    switch (action.id) {
+      case "mode-manual":
+        return "MANUAL";
+      case "mode-test":
+      case "ack-pause":
+        return "PAUSE";
+      case "mode-auto":
+        return "AUTO";
+      case "ack-reset":
+        return "RESET";
+      case "ack-estop":
+        return "ESTOP";
+      case "drive-forward":
+        return "FORWARD";
+      case "drive-left":
+        return "LEFT";
+      case "drive-stop":
+        return "STOP";
+      case "drive-right":
+        return "RIGHT";
+      case "drive-backward":
+        return "BACKWARD";
+      default:
+        return null;
+    }
   };
 
   const openManualControl = async () => {
@@ -489,13 +617,11 @@ export default function ControllerScreen({
 
       try {
         await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
+        setManualControlVisible(true);
         setError(null);
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : "Manual mode command could not be sent");
       }
-      await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
-      setManualControlVisible(true);
-      setError(null);
     } catch (requestError) {
       setError(toFriendlyErrorMessage(requestError, "Unable to open manual control"));
     } finally {
@@ -682,10 +808,17 @@ export default function ControllerScreen({
   }, []);
 
   const performCommand = async (command: string) => {
-
     setPendingAction(command);
     try {
-      await postText(serverUrl, "/command", command.toUpperCase());
+      const upper = command.toUpperCase();
+      const useGatewayDirect = directGatewayPreferred && ["AUTO", "MANUAL", "PAUSE", "STOP", "FORWARD", "BACKWARD", "LEFT", "RIGHT", "ESTOP", "RESET"].includes(upper);
+
+      if (useGatewayDirect) {
+        await postGatewayText(resolvedManualServerUrl, "/command", upper, 5000);
+      } else {
+        await postText(serverUrl, "/command", upper);
+      }
+
       setError(null);
       await refresh();
     } catch (requestError) {
@@ -706,7 +839,12 @@ export default function ControllerScreen({
 
     setPendingAction(actionId);
     try {
-      await postJson(serverUrl, endpoint, {});
+      const gatewayCommand = directGatewayPreferred ? resolveGatewayActionCommand(actionId) : null;
+      if (gatewayCommand) {
+        await postGatewayText(resolvedManualServerUrl, "/command", gatewayCommand, 5000);
+      } else {
+        await postJson(serverUrl, endpoint, {});
+      }
       setError(null);
       await refresh();
     } catch (requestError) {
@@ -765,6 +903,8 @@ export default function ControllerScreen({
         enabled: !demoModeEnabled,
         source: 'app.controller',
       });
+      setDemoPathPoints([]);
+      setTestResult(null);
       setError(null);
       await refresh();
     } catch (requestError) {
@@ -814,6 +954,8 @@ export default function ControllerScreen({
         kind,
         source: 'app.controller',
       });
+      setDemoPathPoints([]);
+      setTestResult(`${kind === 'start' ? 'Spot A' : 'Spot B'} updated. Build Demo Path again to refresh the route.`);
       setError(null);
       await refresh();
     } catch (requestError) {
@@ -834,11 +976,24 @@ export default function ControllerScreen({
       if (allowWeakGps === true) {
         payload.allowWeakGps = true;
       }
-      const response = await postJson<{ warnings?: string[] }>(serverUrl, "/api/demo-mode/path", payload, 25000);
-      setTestResult(Array.isArray(response?.warnings) && response.warnings.length ? response.warnings.join(" ") : null);
+
+      const response = await postJson<DemoPathBuildResponse>(serverUrl, "/api/demo-mode/path", payload, 25000);
+      const warnings = Array.isArray(response?.warnings) ? response.warnings.filter(Boolean) : [];
+      const points = Array.isArray(response?.path?.points) ? response.path.points : [];
+      const pointCount = points.length || Math.max(0, Math.round(Number(response?.path?.pointCount ?? 0)));
+      const notices = pointCount > 0 ? [`Built ${pointCount} demo waypoint${pointCount === 1 ? "" : "s"}.`] : [];
+      setDemoPathPoints(points);
+
+      if (points.length >= 2 && directGatewayPreferred) {
+        notices.push("Ready to send directly from the phone to the gateway.");
+      }
+
+      setTestResult([...notices, ...warnings].join(" ") || null);
       setError(null);
       await refresh();
     } catch (requestError) {
+      setDemoPathPoints([]);
+      setTestResult(null);
       setError(toFriendlyErrorMessage(requestError, "Unable to build the demo path"));
     } finally {
       setPendingAction(null);
@@ -848,15 +1003,41 @@ export default function ControllerScreen({
   const runDemoPath = async (allowWeakGps = true) => {
     setPendingAction("demo-run");
     try {
-      await postJson(serverUrl, "/api/demo-mode/run", {
-        source: "app.controller",
-        allowWeakGps,
-      }, 25000);
-      setTestResult(null);
+      if (directGatewayPreferred && demoPathPoints.length < 2) {
+        throw new Error("Build Demo Path first so the phone has the latest waypoints to send.");
+      }
+
+      const shouldUseDirectGateway = directGatewayPreferred && demoPathPoints.length >= 2;
+
+      if (shouldUseDirectGateway) {
+        const relay = await runDemoDirectToGateway(demoPathPoints);
+        setTestResult(`Demo sent to the gateway over Wi-Fi (${relay.pointCount} waypoints in ${relay.commandCount} commands) and AUTO was requested.`);
+      } else {
+        await postJson(serverUrl, "/api/demo-mode/run", {
+          source: "app.controller",
+          allowWeakGps,
+        }, 25000);
+        setTestResult(null);
+      }
+
       setError(null);
       await refresh();
     } catch (requestError) {
-      setError(toFriendlyErrorMessage(requestError, "Unable to run the demo path"));
+      if (resolvedManualServerUrl && demoPathPoints.length >= 2) {
+        try {
+          const relay = await runDemoDirectToGateway(demoPathPoints);
+          setTestResult(`Demo sent to the gateway over Wi-Fi (${relay.pointCount} waypoints in ${relay.commandCount} commands) and AUTO was requested.`);
+          setError(null);
+          await refresh();
+          return;
+        } catch {
+          // Fall through to the original error below.
+        }
+      }
+
+      setError(toFriendlyErrorMessage(requestError, directGatewayPreferred
+        ? "Unable to run the demo path through the gateway"
+        : "Unable to run the demo path"));
     } finally {
       setPendingAction(null);
     }
@@ -873,12 +1054,18 @@ export default function ControllerScreen({
 
     setPendingAction(action.id);
     try {
-      const payload: Record<string, unknown> = { actionId: action.id };
-      if (field) {
-        payload[field] = rawValue;
+      const directCommand = directGatewayPreferred ? resolveGatewayTestMenuCommand(action) : null;
+      if (directCommand) {
+        await postGatewayText(resolvedManualServerUrl, "/command", directCommand, 5000);
+        setTestResult(`${action.title}: sent directly to the gateway over Wi-Fi.`);
+      } else {
+        const payload: Record<string, unknown> = { actionId: action.id };
+        if (field) {
+          payload[field] = rawValue;
+        }
+        const response = await postJson<TestMenuRunResponse>(serverUrl, "/api/test-menu/run", payload);
+        setTestResult(summarizeCommandResult(action.title, response));
       }
-      const response = await postJson<TestMenuRunResponse>(serverUrl, "/api/test-menu/run", payload);
-      setTestResult(summarizeCommandResult(action.title, response));
       setError(null);
       await refresh();
     } catch (requestError) {
@@ -1010,14 +1197,20 @@ export default function ControllerScreen({
 
   const allowedAction = (actionId: string) => summary?.allowedActions.find((action) => action.id === actionId);
   const missionState = summary?.mission?.state ?? "UNKNOWN";
-  const robotOperationalState = summary?.robot?.state ?? status?.state ?? "UNKNOWN";
   const coveragePct = summary?.coverage?.coveredPct ?? summary?.coverage?.coveragePercent ?? summary?.mission?.coveragePct ?? 0;
-  const hasCriticalAlert = (summary?.alerts ?? []).some((alert) => alert.level === "critical");
-  const latestAlert = summary?.alerts?.[summary.alerts.length - 1] ?? null;
+  const alerts = summary?.alerts ?? [];
+  const hasCriticalAlert = alerts.some((alert) => alert.level === "critical");
+  const hasWarningAlert = alerts.some((alert) => alert.level === "warning");
+  const latestAlert = alerts[alerts.length - 1] ?? null;
   const recentNotes = (summary?.notes ?? []).slice(-2).reverse();
   const recentCommands = commandHistory.slice(0, 6);
   const latestCommand = recentCommands[0] ?? null;
   const connection = summary?.connectivity ?? null;
+  const robotOperationalState = summary?.robot?.state
+    ?? connection?.robot?.robotState
+    ?? ((connection?.robot?.state === "offline" || connection?.robot?.reachable === false) ? "OFFLINE" : null)
+    ?? status?.state
+    ?? "UNKNOWN";
   const overallConnectionState = connection?.overall?.state ?? status?.connectivity?.state ?? (health?.ready ? "online" : "degraded");
   const backendState = connection?.backend?.state ?? (health?.checks?.db ? "online" : "degraded");
   const baseStationState = connection?.baseStation?.state ?? (health?.checks?.bridge ? "online" : "degraded");
@@ -1030,6 +1223,22 @@ export default function ControllerScreen({
   const baseStationStateLabel = formatConnectionStateLabel(baseStationState);
   const robotLinkStateLabel = formatConnectionStateLabel(robotLinkState);
   const commandPathStateLabel = formatConnectionStateLabel(commandPathState);
+  const robotStateTone = ["ESTOP", "FAULT", "ERROR", "SAFE_OFF", "ABORTED"].includes(String(robotOperationalState).toUpperCase())
+    ? "critical"
+    : (["PAUSE", "PAUSED", "MANUAL", "OFFLINE"].includes(String(robotOperationalState).toUpperCase()) || hasWarningAlert)
+      ? "warning"
+      : "ok";
+  const robotPillStyle = robotStateTone === "critical"
+    ? styles.statusPillCritical
+    : robotStateTone === "warning"
+      ? styles.statusPillPoll
+      : styles.statusPillLive;
+  const alertsPillStyle = hasCriticalAlert
+    ? styles.statusPillCritical
+    : hasWarningAlert
+      ? styles.statusPillPoll
+      : styles.statusPillOk;
+  const alertsPillLabel = hasCriticalAlert ? "Critical Alert" : hasWarningAlert ? "Warning Active" : "No Active Alerts";
   const connectionReason = connection?.overall?.reason ?? status?.connectivity?.reason ?? null;
   const baseStationReachable = Boolean(connection?.baseStation?.reachable ?? (baseStationState === "online"));
   const connectionPathLabel = connectionMode === 'cloud'
@@ -1061,9 +1270,9 @@ export default function ControllerScreen({
         : `${(stm32TelemetryAgeMs / 1000).toFixed(stm32TelemetryAgeMs < 10000 ? 1 : 0)} s ago`)
     : 'No telemetry yet';
   const gpsReady = Boolean(connection?.robot?.gpsReady);
+  const demoModeEnabled = Boolean(summary?.demo?.enabled);
   const waypointsCommitted = summary?.lora?.wpPushState === "committed";
   const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
-  const demoModeEnabled = Boolean(summary?.demo?.enabled);
   const demoSpots = summary?.demo?.spots ?? null;
   const demoSpotGpsStatus = summary?.demo?.spotGpsStatus ?? null;
   const demoReadiness = summary?.demo?.readiness ?? null;
@@ -1072,12 +1281,14 @@ export default function ControllerScreen({
   const robotMotor = summary?.robot?.motor ?? null;
   const robotProx = summary?.robot?.prox ?? null;
   const robotHeading = typeof summary?.robot?.heading === "number" ? summary.robot.heading : null;
-  const demoBlockers = Array.isArray(demoReadiness?.blockers) ? demoReadiness.blockers.filter(Boolean) : [];
+  const demoGatewayReady = directGatewayPreferred && demoPathPoints.length >= 2;
+  const demoBlockers = (Array.isArray(demoReadiness?.blockers) ? demoReadiness.blockers.filter(Boolean) : [])
+    .filter((reason) => !(directGatewayPreferred && /waypoints are .*not committed|no command transport available/i.test(reason)));
   const restoredAt = health?.persistence?.restoredAt ?? null;
   const showRecoveryBanner = Boolean(restoredAt && missionState !== "IDLE");
   const summaryItems = [
     { label: "Mission", value: missionStateLabel, detail: "Current status" },
-    { label: "Robot", value: robotOperationalLabel, detail: robotLinkState === "online" ? "Telemetry live" : "Telemetry needs attention" },
+    { label: "Robot", value: robotOperationalLabel, detail: hasCriticalAlert ? "Fault active" : hasWarningAlert ? "Warning active" : (robotLinkState === "online" ? "Telemetry live" : "Telemetry needs attention") },
     { label: "Coverage", value: `${coveragePct.toFixed(1)}%`, detail: "Progress" },
   ];
   const systemCheckItems = [
@@ -1086,7 +1297,7 @@ export default function ControllerScreen({
     { label: "Gateway", value: gatewayLabel || formatConnectionStateLabel(gatewayState), detail: gatewayReason ?? "LoRa bridge", good: gatewayWorking },
     { label: "STM32", value: stm32StateLabel, detail: stm32LastSeenLabel, good: stm32Online },
     { label: "GPS", value: gpsReady ? "Ready" : "Needs attention", detail: gpsReady ? "Autonomy ready" : "Wait for lock", good: gpsReady },
-    { label: "Waypoints", value: waypointsCommitted ? "Committed" : "Not committed", detail: commandPathStateLabel, good: waypointsCommitted },
+    { label: "Waypoints", value: demoGatewayReady ? "Ready in app" : (waypointsCommitted ? "Committed" : "Not committed"), detail: directGatewayPreferred ? "Phone to gateway HTTP" : commandPathStateLabel, good: demoGatewayReady || waypointsCommitted },
   ];
   const attentionItems = systemCheckItems
     .filter((item) => item.good === false)
@@ -1098,7 +1309,7 @@ export default function ControllerScreen({
     { label: "STM32 live", detail: stm32Online ? `Telemetry is current (${stm32LastSeenLabel}).` : `STM32 telemetry is stale or missing (${stm32LastSeenLabel}).`, good: stm32Online },
     { label: "Robot link live", detail: "Robot telemetry is current.", good: robotLinkState === "online" },
     { label: "GPS ready", detail: "The robot has a valid GPS fix for autonomy.", good: gpsReady },
-    { label: "Waypoints committed", detail: "The planned path has been committed to the robot.", good: waypointsCommitted },
+    { label: "Waypoints committed", detail: directGatewayPreferred ? "The phone is ready to send the planned path directly to the gateway." : "The planned path has been committed to the robot.", good: demoGatewayReady || waypointsCommitted },
   ];
   const connectionPillStyle = overallConnectionState === "online"
     ? styles.statusPillLive
@@ -1207,14 +1418,14 @@ export default function ControllerScreen({
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
         </View>
-        <View style={[styles.statusPill, styles.statusPillMission]}>
+        <View style={[styles.statusPill, robotPillStyle]}>
           <Text style={styles.statusPillText}>{robotOperationalLabel}</Text>
         </View>
         <View style={[styles.statusPill, connectionPillStyle]}>
           <Text style={styles.statusPillText}>{overallConnectionLabel}</Text>
         </View>
-        <View style={[styles.statusPill, hasCriticalAlert ? styles.statusPillCritical : styles.statusPillOk]}>
-          <Text style={styles.statusPillText}>{hasCriticalAlert ? "Critical Alert" : "No Critical Alerts"}</Text>
+        <View style={[styles.statusPill, alertsPillStyle]}>
+          <Text style={styles.statusPillText}>{alertsPillLabel}</Text>
         </View>
       </View>
 
@@ -1495,18 +1706,20 @@ export default function ControllerScreen({
         <AppButton
           label={pendingAction === "demo-run" ? "Starting Demo Run..." : "Run Demo Path"}
           onPress={() => runDemoPath(true)}
-          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || pendingAction === "demo-path" || pendingAction === "demo-path-override" || pendingAction === "demo-run"}
+          disabled={!demoModeEnabled || !demoSpots?.start || !demoSpots?.end || (directGatewayPreferred && demoPathPoints.length < 2) || pendingAction === "demo-path" || pendingAction === "demo-path-override" || pendingAction === "demo-run"}
           variant="success"
           style={styles.demoBuildButton}
         />
+        <Text style={[styles.metaText, { color: theme.text }]}>Current path: {demoPathPoints.length} waypoint{demoPathPoints.length === 1 ? "" : "s"}</Text>
+        <Text style={[styles.metaText, { color: theme.muted }]}>Transport: {directGatewayPreferred ? "Phone to gateway over Wi-Fi" : "Server-managed delivery"}</Text>
         <View style={styles.demoSpotGrid}>
           <View style={styles.demoSpotCard}>
             <Text style={[styles.quickLabel, { color: theme.muted }]}>Run Readiness</Text>
             <Text style={[styles.metaText, { color: theme.text }]}>
-              Mission {demoReadiness?.missionState ?? "Unknown"} • Waypoints {demoReadiness?.wpPushState ?? "none"}
+              Mission {demoReadiness?.missionState ?? "Unknown"} • Waypoints {demoGatewayReady ? "ready in app" : (demoReadiness?.wpPushState ?? "none")}
             </Text>
             <Text style={[styles.metaText, { color: theme.text }]}>
-              {demoReadiness?.readyToRun ? "Ready to run" : "Not ready"}
+              {(demoGatewayReady || demoReadiness?.readyToRun) ? "Ready to run" : "Not ready"}
             </Text>
             {demoBlockers.length ? demoBlockers.slice(0, 4).map((reason) => (
               <Text key={reason} style={styles.demoError}>{reason}</Text>

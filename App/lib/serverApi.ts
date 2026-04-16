@@ -87,7 +87,7 @@ export type BaseStationSetupProbeResult = {
 };
 
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 5000) {
-0  const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(1000, Math.round(timeoutMs)) : 5000;
+  const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(1000, Math.round(timeoutMs)) : 5000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
 
