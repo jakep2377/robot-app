@@ -40,6 +40,22 @@ type ForecastPayload = {
   city?: { timezone?: number };
 };
 
+type LatLonPayload = {
+  lat?: number | null;
+  lon?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+};
+
+type PlannerPublicState = {
+  boundary?: LatLonPayload[] | null;
+};
+
+type PlannerStateResponse = {
+  ok?: boolean;
+  state?: PlannerPublicState | null;
+};
+
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -85,10 +101,62 @@ const TEST_CONDITION:
   | "lightSnow"
   | "moderateHeavySnow"
   | "freezingRain"
-  | "sleet" = "moderateHeavySnow";
+  | "sleet" = "lightSnow";
 // Leave as null to use the default temperature hardcoded in the selected fake case.
-const TEST_TEMP_OVERRIDE_F: number | null = 14;
+const TEST_TEMP_OVERRIDE_F: number | null = 20;
 const clampPct = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
+const clampNonNegative = (value: number) => Math.max(0, value);
+
+function toLatLonPoint(point: unknown) {
+  if (!point || typeof point !== "object") return null;
+  const candidate = point as LatLonPayload;
+  const latitude = Number(candidate.lat ?? candidate.latitude);
+  const longitude = Number(candidate.lon ?? candidate.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  return { latitude, longitude };
+}
+
+function computeBoundaryAreaM2(points: unknown) {
+  const boundary = Array.isArray(points)
+    ? points.map((point) => toLatLonPoint(point)).filter((point): point is { latitude: number; longitude: number } => Boolean(point))
+    : [];
+  if (boundary.length < 3) return 0;
+
+  let minLat = boundary[0]?.latitude ?? 0;
+  let maxLat = minLat;
+  for (const point of boundary) {
+    minLat = Math.min(minLat, point.latitude);
+    maxLat = Math.max(maxLat, point.latitude);
+  }
+
+  let areaAccumulator = 0;
+  for (let index = 0; index < boundary.length; index += 1) {
+    const current = boundary[index];
+    const next = boundary[(index + 1) % boundary.length];
+    areaAccumulator += (current.longitude * next.latitude) - (next.longitude * current.latitude);
+  }
+
+  return Math.abs(areaAccumulator) * 0.5 * 111_320 * 111_320 * Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
+}
+
+function sanitizeDecimalInput(text: string, maxLength: number) {
+  const cleaned = text.replace(/[^0-9.]/g, "");
+  const parts = cleaned.split(".");
+  const normalized = parts.length <= 1 ? cleaned : `${parts[0]}.${parts.slice(1).join("")}`;
+  return normalized.slice(0, maxLength);
+}
+
+function parseDecimal(text: string) {
+  if (!text.trim()) return 0;
+  const parsed = Number.parseFloat(text);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function calculateFillLiters(areaM2: number, brinePercent: number) {
+  if (areaM2 <= 0 || brinePercent <= 0) return 0;
+  return (areaM2 * (brinePercent / 100)) / 15;
+}
 
 const getPrecipInches = (value?: { rain?: Record<string, number>; snow?: Record<string, number> }) =>
   Math.max(value?.rain?.["1h"] ?? 0, value?.rain?.["3h"] ?? 0, value?.snow?.["1h"] ?? 0, value?.snow?.["3h"] ?? 0) / 25.4;
@@ -359,6 +427,8 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   const [automationBusy, setAutomationBusy] = useState(false);
   const [manualSaltText, setManualSaltText] = useState(String(clampPct(saltPct)));
   const [manualBrineText, setManualBrineText] = useState(String(clampPct(brinePct)));
+  const [fillBrineText, setFillBrineText] = useState(String(clampPct(brinePct)));
+  const [coverageAreaText, setCoverageAreaText] = useState("0");
   const [selectedLookAheadDay, setSelectedLookAheadDay] = useState("");
   const [selectedLookAheadAt, setSelectedLookAheadAt] = useState<number | null>(null);
   const [customTimeText, setCustomTimeText] = useState("");
@@ -654,14 +724,32 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     }
   };
 
-  useEffect(() => { loadWeather(DEFAULT_LOCATION); }, []);
-  useEffect(() => { setManualSaltText(String(clampPct(saltPct))); }, [saltPct]);
-  useEffect(() => { setManualBrineText(String(clampPct(brinePct))); }, [brinePct]);
-
   const currentMix = useMemo(() => {
     if (!weather) return null;
     return buildOpenWeatherTableMix(weather.main.temp, weather.main.humidity, `${weather.weather?.[0]?.main ?? ""} ${weather.weather?.[0]?.description ?? ""}`.toLowerCase(), getPrecipInches(weather), weather.wind?.speed ?? 0, weather.wind?.gust ?? 0, weather.weather?.[0]?.id);
   }, [weather]);
+
+  useEffect(() => { loadWeather(DEFAULT_LOCATION); }, []);
+  useEffect(() => { setManualSaltText(String(clampPct(saltPct))); }, [saltPct]);
+  useEffect(() => { setManualBrineText(String(clampPct(brinePct))); }, [brinePct]);
+  useEffect(() => { setFillBrineText(String(currentMix?.brinePct ?? clampPct(brinePct))); }, [currentMix?.brinePct, brinePct]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadPlannerArea = async () => {
+      const result = await getJsonAllowError<PlannerStateResponse>(serverUrl, "/api/state");
+      if (!active || !result.ok || !result.data) return;
+      const nextAreaM2 = computeBoundaryAreaM2(result.data.state?.boundary);
+      setCoverageAreaText(String(Math.round(nextAreaM2)));
+    };
+
+    void loadPlannerArea();
+
+    return () => {
+      active = false;
+    };
+  }, [serverUrl]);
 
   const suggestion = useMemo<ScheduleTarget>(() => {
     if (!forecast?.list?.length) return null;
@@ -984,6 +1072,9 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   const currentApplied = clampPct(saltPct) === currentMix.saltPct && clampPct(brinePct) === currentMix.brinePct;
   const manualSaltValue = clampPct(Number.parseInt(manualSaltText || "0", 10) || 0);
   const manualBrineValue = clampPct(Number.parseInt(manualBrineText || "0", 10) || 0);
+  const fillBrineValue = clampPct(parseDecimal(fillBrineText));
+  const coverageAreaValue = clampNonNegative(parseDecimal(coverageAreaText));
+  const fillLiters = calculateFillLiters(coverageAreaValue, fillBrineValue);
   const weatherIcon = getWeatherIconName(weather.weather?.[0]?.description ?? "");
   const badgeStyle = frost.level === "high" ? styles.badgeHigh : frost.level === "moderate" ? styles.badgeModerate : styles.badgeLow;
   const activeLookAheadDay = lookAheadDays.find((day) => day.key === selectedLookAheadDay) ?? lookAheadDays[0] ?? null;
@@ -1053,6 +1144,33 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
           <AppButton label="Use Values" onPress={() => { setSaltPct(manualSaltValue); setBrinePct(manualBrineValue); }} style={styles.manualButton} />
         </View>
         <Text style={[styles.callout, styles.badgeBlue, styles.calloutText]}>{currentMix.reason}</Text>
+        <View style={styles.fillEstimatorCard}>
+          <Text style={styles.fillEstimatorTitle}>Brine fill estimate</Text>
+          <Text style={styles.fillEstimatorHint}>Uses brine output % and service area coverage. Map area auto-fills when available, and both values can be edited.</Text>
+          <View style={styles.manualRow}>
+            <View style={styles.manualField}>
+              <Text style={styles.manualFieldLabel}>Brine %</Text>
+              <TextInput
+                style={styles.manualInput}
+                value={fillBrineText}
+                onChangeText={(text) => setFillBrineText(sanitizeDecimalInput(text, 6))}
+                keyboardType="decimal-pad"
+                maxLength={6}
+              />
+            </View>
+            <View style={styles.manualField}>
+              <Text style={styles.manualFieldLabel}>Area m²</Text>
+              <TextInput
+                style={styles.manualInput}
+                value={coverageAreaText}
+                onChangeText={(text) => setCoverageAreaText(sanitizeDecimalInput(text, 10))}
+                keyboardType="decimal-pad"
+                maxLength={10}
+              />
+            </View>
+          </View>
+          <Text style={styles.fillEstimatorResult}>Fill with {fillLiters.toFixed(fillLiters >= 10 ? 0 : 1)} Liters</Text>
+        </View>
         <AppButton
           label={currentApplied ? "Applied" : "Apply to Controller"}
           onPress={() => { setSaltPct(currentMix.saltPct); setBrinePct(currentMix.brinePct); }}
@@ -1250,6 +1368,10 @@ const styles = StyleSheet.create({
   manualFieldLabel: { color: "#63788e", fontSize: 13, fontWeight: "700", textTransform: "uppercase", textAlign: "center" },
   manualInput: { minHeight: 46, borderRadius: 10, borderWidth: 1, borderColor: "#cfd9e4", backgroundColor: "#fbfcfe", paddingHorizontal: 12, color: "#16324f", fontSize: 20, fontWeight: "700", textAlign: "center" },
   manualButton: { minWidth: 84, minHeight: 44, alignSelf: "flex-end" },
+  fillEstimatorCard: { gap: 8, padding: 12, borderRadius: 12, backgroundColor: "#f8fbff", borderWidth: 1, borderColor: "#dce5ef" },
+  fillEstimatorTitle: { color: "#16324f", fontSize: 14, fontWeight: "800" },
+  fillEstimatorHint: { color: "#5b7288", fontSize: 12, lineHeight: 17 },
+  fillEstimatorResult: { color: "#1c6a47", fontSize: 18, fontWeight: "800", textAlign: "center" },
   applyButton: { minHeight: 40 },
   applyButtonDone: { backgroundColor: "#2c6fb7" },
   schedulePrimary: { color: "#16324f", fontSize: 16, fontWeight: "700" },
