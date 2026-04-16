@@ -342,6 +342,7 @@ type Props = {
   connectionMode: 'discovering' | 'local' | 'cloud' | 'manual';
   connectionBusy: boolean;
   onOpenConnection: () => void;
+  onDemoPathPreviewChange?: (points: DemoPathPoint[]) => void;
 };
 
 const MISSION_ENDPOINTS: Record<string, string> = {
@@ -460,6 +461,7 @@ export default function ControllerScreen({
   connectionMode,
   connectionBusy,
   onOpenConnection,
+  onDemoPathPreviewChange,
 }: Props) {
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<StatusPayload | null>(null);
@@ -577,7 +579,7 @@ export default function ControllerScreen({
     }
   };
 
-  const resolveGatewayTestMenuCommand = (action: TestMenuAction) => {
+  const resolveGatewayTestMenuCommand = (action: TestMenuAction, rawValue = "") => {
     switch (action.id) {
       case "mode-manual":
         return "MANUAL";
@@ -600,6 +602,25 @@ export default function ControllerScreen({
         return "RIGHT";
       case "drive-backward":
         return "BACKWARD";
+      case "salt-50":
+        return "TEST SALT 50";
+      case "brine-50":
+        return "TEST BRINE 50";
+      case "agitator-on":
+        return "AGITATOR ON";
+      case "thrower-on":
+        return "THROWER ON";
+      case "relay-on":
+        return "RELAY ON";
+      case "vibration-on":
+        return "VIBRATION ON";
+      case "all-on":
+        return ["TEST SALT 100", "TEST BRINE 100", "AGITATOR ON", "THROWER ON", "RELAY ON", "VIBRATION ON"];
+      case "safe-off":
+        return ["TEST SALT 0", "TEST BRINE 0", "AGITATOR OFF", "THROWER OFF", "RELAY OFF", "VIBRATION OFF", "STOP"];
+      case "mix-preset":
+      case "raw-command":
+        return rawValue || null;
       default:
         return null;
     }
@@ -739,6 +760,10 @@ export default function ControllerScreen({
     const timer = setInterval(requestRefresh, 1200);
     return () => clearInterval(timer);
   }, [requestRefresh, serverReachable]);
+
+  useEffect(() => {
+    onDemoPathPreviewChange?.(demoPathPoints);
+  }, [demoPathPoints, onDemoPathPreviewChange]);
 
   useEffect(() => {
     if (!serverReachable) {
@@ -1054,10 +1079,18 @@ export default function ControllerScreen({
 
     setPendingAction(action.id);
     try {
-      const directCommand = directGatewayPreferred ? resolveGatewayTestMenuCommand(action) : null;
+      const directCommand = directGatewayPreferred ? resolveGatewayTestMenuCommand(action, rawValue) : null;
       if (directCommand) {
-        await postGatewayText(resolvedManualServerUrl, "/command", directCommand, 5000);
-        setTestResult(`${action.title}: sent directly to the gateway over Wi-Fi.`);
+        const commands = Array.isArray(directCommand) ? directCommand : [directCommand];
+        for (let index = 0; index < commands.length; index += 1) {
+          await postGatewayText(resolvedManualServerUrl, "/command", commands[index], 5000);
+          if (index < commands.length - 1) {
+            await delayMs(100);
+          }
+        }
+        setTestResult(commands.length === 1
+          ? `${action.title}: sent directly to the gateway over Wi-Fi.`
+          : `${action.title}: ${commands.length} commands sent directly to the gateway over Wi-Fi.`);
       } else {
         const payload: Record<string, unknown> = { actionId: action.id };
         if (field) {

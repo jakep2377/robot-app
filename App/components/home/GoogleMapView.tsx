@@ -5,7 +5,7 @@ import MapView, { Circle as MapCircle, LatLng, LongPressEvent, MapPressEvent, Ma
 import Svg, { Circle, Defs, LinearGradient, Path as SvgPath, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { getJson, postJson, toWebSocketUrl } from '../../lib/serverApi';
+import { getGatewayJsonAllowError, getJson, postJson, toWebSocketUrl } from '../../lib/serverApi';
 import AppButton from '../common/AppButton';
 import AppNoticeModal from '../common/AppNoticeModal';
 
@@ -59,8 +59,39 @@ type LatLonPayload = {
   latitude?: number | null;
   longitude?: number | null;
   headingDeg?: number | null;
+  heading?: number | null;
+  yaw?: number | null;
   state?: string | null;
   timestampMs?: number | null;
+  gpsSat?: number | null;
+  gpsHdop?: number | null;
+  sat?: number | null;
+  hdop?: number | null;
+  prox?: {
+    left?: number | null;
+    right?: number | null;
+  } | null;
+  pl?: number | null;
+  pr?: number | null;
+};
+
+type RobotLiveTelemetry = {
+  headingDeg: number | null;
+  gpsSat: number | null;
+  gpsHdop: number | null;
+  proxLeft: number | null;
+  proxRight: number | null;
+  state: string | null;
+};
+
+type BackendStatusResponse = {
+  manual_command_url?: string | null;
+};
+
+type GatewayStatusResponse = {
+  ok?: boolean;
+  manualReady?: boolean;
+  robotTelemetry?: LatLonPayload | null;
 };
 
 type PlannerPublicState = {
@@ -98,6 +129,7 @@ type Props = {
   serverUrl: string;
   saltPct: number;
   brinePct: number;
+  demoPathPoints?: unknown[];
 };
 
 type PlanningCacheState = {
@@ -137,6 +169,30 @@ function normalizeHeadingDeg(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const normalized = value % 360;
   return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function toFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const next = Number(value);
+    if (Number.isFinite(next)) return next;
+  }
+  return null;
+}
+
+function toRobotLiveTelemetry(point: unknown): RobotLiveTelemetry {
+  if (!point || typeof point !== 'object') {
+    return { headingDeg: null, gpsSat: null, gpsHdop: null, proxLeft: null, proxRight: null, state: null };
+  }
+
+  const candidate = point as LatLonPayload;
+  return {
+    headingDeg: normalizeHeadingDeg(toFiniteNumber(candidate.headingDeg, candidate.heading, candidate.yaw)),
+    gpsSat: toFiniteNumber(candidate.gpsSat, candidate.sat),
+    gpsHdop: toFiniteNumber(candidate.gpsHdop, candidate.hdop),
+    proxLeft: toFiniteNumber(candidate.prox?.left, candidate.pl),
+    proxRight: toFiniteNumber(candidate.prox?.right, candidate.pr),
+    state: typeof candidate.state === 'string' ? candidate.state : null,
+  };
 }
 
 function toLatLngPoint(point: unknown): LatLng | null {
@@ -246,7 +302,7 @@ function DirectionArrow({ size, color }: { size: number; color: string }) {
   );
 }
 
-export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
+export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPoints = [] }: Props) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
   const [drawingMode, setDrawingMode] = useState(planningCache.drawingMode);
@@ -262,6 +318,15 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [message, setMessage] = useState(planningCache.message);
   const [robotPoint, setRobotPoint] = useState<LatLng | null>(planningCache.robotPoint);
   const [robotTrail, setRobotTrail] = useState<LatLng[]>(planningCache.robotTrail);
+  const [robotTelemetry, setRobotTelemetry] = useState<RobotLiveTelemetry>({
+    headingDeg: null,
+    gpsSat: null,
+    gpsHdop: null,
+    proxLeft: null,
+    proxRight: null,
+    state: null,
+  });
+  const [manualGatewayUrl, setManualGatewayUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [mapType, setMapType] = useState<'standard' | 'satellite'>(planningCache.mapType);
   const [mapCenter, setMapCenter] = useState<LatLng>(planningCache.baseStation ?? DEFAULT_MAP_CENTER);
@@ -383,6 +448,36 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   useEffect(() => {
     robotPointRef.current = robotPoint;
   }, [robotPoint]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshGatewayUrl = async () => {
+      try {
+        const status = await getJson<BackendStatusResponse>(serverUrl, '/status', 2500);
+        const discovered = typeof status?.manual_command_url === 'string' && status.manual_command_url.trim()
+          ? status.manual_command_url.trim()
+          : 'http://172.20.10.2';
+        if (!cancelled) {
+          setManualGatewayUrl(discovered);
+        }
+      } catch {
+        if (!cancelled) {
+          setManualGatewayUrl((current) => current ?? 'http://172.20.10.2');
+        }
+      }
+    };
+
+    void refreshGatewayUrl();
+    const timer = setInterval(() => {
+      void refreshGatewayUrl();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [serverUrl]);
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
     const earthRadiusM = 6371000;
@@ -812,6 +907,51 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setRobotTrail((current) => sanitizeRobotTrail([...current, coordinate]));
   };
 
+  useEffect(() => {
+    if (!manualGatewayUrl) return;
+    let cancelled = false;
+
+    const refreshDirectGatewayTelemetry = async () => {
+      try {
+        const response = await getGatewayJsonAllowError<GatewayStatusResponse>(manualGatewayUrl, '/status', 1500);
+        const nextTelemetry = response.data?.robotTelemetry ?? null;
+        if (!response.ok || !nextTelemetry || cancelled) return;
+
+        const parsedTelemetry = toRobotLiveTelemetry(nextTelemetry);
+        setRobotTelemetry((current) => ({
+          headingDeg: parsedTelemetry.headingDeg ?? current.headingDeg,
+          gpsSat: parsedTelemetry.gpsSat ?? current.gpsSat,
+          gpsHdop: parsedTelemetry.gpsHdop ?? current.gpsHdop,
+          proxLeft: parsedTelemetry.proxLeft ?? current.proxLeft,
+          proxRight: parsedTelemetry.proxRight ?? current.proxRight,
+          state: parsedTelemetry.state ?? current.state,
+        }));
+
+        const nextRobotPoint = toLatLngPoint(nextTelemetry);
+        if (nextRobotPoint) {
+          const lastPoint = robotPointRef.current;
+          const jumpMeters = lastPoint ? haversineDistanceMeters(lastPoint, nextRobotPoint) : 0;
+          if (!lastPoint || jumpMeters <= MAX_ROBOT_JUMP_METERS) {
+            setRobotPoint(nextRobotPoint);
+            appendRobotTrailPoint(nextRobotPoint);
+          }
+        }
+      } catch {
+        // Ignore direct gateway polling failures and keep existing telemetry visible.
+      }
+    };
+
+    void refreshDirectGatewayTelemetry();
+    const timer = setInterval(() => {
+      void refreshDirectGatewayTelemetry();
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [manualGatewayUrl]);
+
   const applyRemotePlannerState = async (
     remoteState: PlannerPublicState | null | undefined,
     fitToState = false,
@@ -877,6 +1017,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     }
     setRobotPoint(nextRobotPoint);
     setRobotTrail(nextRobotTrail);
+    setRobotTelemetry(toRobotLiveTelemetry(remoteState.robot));
 
     if (!preserveLocalPlanning && includePlanningState && nextPlannedPath.length > 1) {
       setMessage(`Saved route loaded: ${nextPlannedPath.length} points over ${(computePathDistanceMeters(nextPlannedPath) / 1000).toFixed(2)} km.`);
@@ -964,6 +1105,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         if (message.event === 'telemetry.updated') {
           const nextRobotPoint = toLatLngPoint(message.payload?.robot);
+          setRobotTelemetry(toRobotLiveTelemetry(message.payload?.robot));
           if (nextRobotPoint) {
             const lastPoint = robotPointRef.current;
             const jumpMeters = lastPoint ? haversineDistanceMeters(lastPoint, nextRobotPoint) : 0;
@@ -1130,8 +1272,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const routeStrokeWidth = areaM2 > 5000 ? 3.4 : areaM2 > 1600 ? 3.0 : 2.6;
   const routeHaloWidth = routeStrokeWidth + 1.8;
   const arrowSize = areaM2 > 5000 ? 20 : areaM2 > 1600 ? 17 : 15;
-  const pathArrowPoints = plannedArrows;
+  const demoPreviewPath = sanitizePlannedPath(toPlannedCoordinates(demoPathPoints));
+  const showingDemoPreview = demoPreviewPath.length > 1;
+  const displayPath = showingDemoPreview ? demoPreviewPath : plannedPath;
+  const pathArrowPoints = showingDemoPreview
+    ? demoPreviewPath.filter((point) => point.headingDeg != null)
+    : plannedArrows;
   const activeBaseStation = baseStationPoint ?? selection?.baseStation ?? null;
+  const displayRouteColor = showingDemoPreview ? '#00a88f' : '#6f52ed';
 
   return (
     <View style={styles.container}>
@@ -1213,8 +1361,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
               description="Live position"
               tracksViewChanges={false}
             >
-              <View style={styles.robotMarker}>
-                <MaterialCommunityIcons name="robot-industrial" size={16} color="#ffffff" />
+              <View style={[
+                styles.robotMarker,
+                robotTelemetry.headingDeg != null ? { transform: [{ rotate: `${robotTelemetry.headingDeg}deg` }] } : null,
+              ]}>
+                <MaterialCommunityIcons name="navigation" size={16} color="#ffffff" />
               </View>
             </Marker>
           ) : null}
@@ -1228,6 +1379,42 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
             >
               <CornerPin tone="start" />
             </Marker>
+          ) : null}
+          {displayPath.length > 1 ? (
+            <>
+              <Polyline
+                coordinates={displayPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
+                strokeColor="rgba(255,255,255,0.96)"
+                strokeWidth={routeHaloWidth}
+                geodesic
+              />
+              <Polyline
+                coordinates={displayPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
+                strokeColor={displayRouteColor}
+                strokeWidth={routeStrokeWidth}
+                geodesic
+              />
+              {pathArrowPoints.map((point, index) => (
+                <Marker
+                  key={`path-arrow-${index}`}
+                  coordinate={point}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  zIndex={30}
+                  flat
+                  tracksViewChanges
+                >
+                  <View
+                    style={[
+                      styles.pathArrow,
+                      { width: arrowSize, height: arrowSize },
+                      { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
+                    ]}
+                  >
+                    <DirectionArrow size={Math.max(12, arrowSize - 1)} color={displayRouteColor} />
+                  </View>
+                </Marker>
+              ))}
+            </>
           ) : null}
           {selection ? (
             <>
@@ -1262,42 +1449,6 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
                   />
                 </Marker>
               ))}
-              {plannedPath.length > 1 ? (
-                <>
-                  <Polyline
-                    coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
-                    strokeColor="rgba(255,255,255,0.96)"
-                    strokeWidth={routeHaloWidth}
-                    geodesic
-                  />
-                  <Polyline
-                    coordinates={plannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))}
-                    strokeColor="#6f52ed"
-                    strokeWidth={routeStrokeWidth}
-                    geodesic
-                  />
-                  {pathArrowPoints.map((point, index) => (
-                    <Marker
-                      key={`path-arrow-${index}`}
-                      coordinate={point}
-                      anchor={{ x: 0.5, y: 0.5 }}
-                      zIndex={30}
-                      flat
-                      tracksViewChanges
-                    >
-                      <View
-                        style={[
-                          styles.pathArrow,
-                          { width: arrowSize, height: arrowSize },
-                          { transform: [{ rotate: `${point.headingDeg ?? 0}deg` }] },
-                        ]}
-                      >
-                        <DirectionArrow size={Math.max(12, arrowSize - 1)} color="#6f52ed" />
-                      </View>
-                    </Marker>
-                  ))}
-                </>
-              ) : null}
             </>
           ) : null}
         </MapView>
@@ -1353,6 +1504,31 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
       <View pointerEvents="box-none" style={[styles.overlay, { backgroundColor: MAP_THEME.overlayBg, borderColor: MAP_THEME.overlayBorder, bottom: insets.bottom + 14 }]}> 
         <Text style={[styles.overlayText, { color: MAP_THEME.text }]} numberOfLines={2}>{message}</Text>
+
+        {(robotTelemetry.state || robotTelemetry.headingDeg != null || robotTelemetry.gpsSat != null || robotTelemetry.proxLeft != null || robotTelemetry.proxRight != null) ? (
+          <View style={styles.liveTelemetryRow}>
+            {robotTelemetry.state ? (
+              <View style={styles.liveTelemetryChip}>
+                <Text style={styles.liveTelemetryText}>State {robotTelemetry.state}</Text>
+              </View>
+            ) : null}
+            {robotTelemetry.headingDeg != null ? (
+              <View style={styles.liveTelemetryChip}>
+                <Text style={styles.liveTelemetryText}>Heading {robotTelemetry.headingDeg.toFixed(1)}°</Text>
+              </View>
+            ) : null}
+            {(robotTelemetry.gpsSat != null || robotTelemetry.gpsHdop != null) ? (
+              <View style={styles.liveTelemetryChip}>
+                <Text style={styles.liveTelemetryText}>GPS {robotTelemetry.gpsSat ?? '--'} sat • HDOP {robotTelemetry.gpsHdop != null ? robotTelemetry.gpsHdop.toFixed(1) : '--'}</Text>
+              </View>
+            ) : null}
+            {(robotTelemetry.proxLeft != null || robotTelemetry.proxRight != null) ? (
+              <View style={styles.liveTelemetryChip}>
+                <Text style={styles.liveTelemetryText}>Prox L {robotTelemetry.proxLeft ?? '--'} • R {robotTelemetry.proxRight ?? '--'} cm</Text>
+              </View>
+            ) : null}
+          </View>
+        ) : null}
 
         {activeBaseStation ? (
           <View style={styles.baseStationSummaryBlock}>
@@ -1653,6 +1829,25 @@ const styles = StyleSheet.create({
     color: '#16324f',
     fontSize: 11,
     lineHeight: 15,
+    fontWeight: '700',
+  },
+  liveTelemetryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  liveTelemetryChip: {
+    borderRadius: 999,
+    backgroundColor: '#eef4fb',
+    borderWidth: 1,
+    borderColor: '#d7e4f2',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  liveTelemetryText: {
+    color: '#16324f',
+    fontSize: 10,
     fontWeight: '700',
   },
   actionRow: {

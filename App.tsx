@@ -139,6 +139,7 @@ export default function App() {
   const [baseStationSetupStatus, setBaseStationSetupStatus] = useState<BaseStationSetupStatus | null>(null);
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
+  const [demoPathPoints, setDemoPathPoints] = useState<Array<{ lat: number; lon: number; salt?: number; brine?: number }>>([]);
 
   const runDiscovery = async () => {
     setConnectionBusy(true);
@@ -332,6 +333,7 @@ export default function App() {
                   connectionMode={connection.mode}
                   connectionBusy={connectionBusy}
                   onOpenConnection={() => setConnectionModalVisible(true)}
+                  onDemoPathPreviewChange={setDemoPathPoints}
                 />
               )}
             </Tab.Screen>
@@ -344,7 +346,7 @@ export default function App() {
                 ),
               }}
             >
-              {() => <AreaMapScreen serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} />}
+              {() => <AreaMapScreen serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} demoPathPoints={demoPathPoints} />}
             </Tab.Screen>
             <Tab.Screen
               name="Weather"

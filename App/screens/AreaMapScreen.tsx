@@ -6,12 +6,13 @@ type Props = {
   serverUrl: string;
   saltPct: number;
   brinePct: number;
+  demoPathPoints?: unknown[];
 };
 
-export default function AreaMapScreen({ serverUrl, saltPct, brinePct }: Props) {
+export default function AreaMapScreen({ serverUrl, saltPct, brinePct, demoPathPoints = [] }: Props) {
   return (
     <View style={styles.container}>
-      <GoogleMapView serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} />
+      <GoogleMapView serverUrl={serverUrl} saltPct={saltPct} brinePct={brinePct} demoPathPoints={demoPathPoints} />
     </View>
   );
 }
