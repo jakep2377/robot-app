@@ -406,6 +406,21 @@ function summarizeCommandResult(title: string, response: TestMenuRunResponse): s
   return `${title}: ${formatted || (response.ok ? "Completed" : "Failed")}`;
 }
 
+function toFriendlyErrorMessage(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message.trim() : "";
+  const normalized = raw.toLowerCase();
+
+  if (!raw) return fallback;
+  if (normalized.includes("waypoint")) return "The route is still syncing to the robot. Please wait a moment and try again.";
+  if (normalized.includes("gps")) return "The robot is still acquiring its position. Please wait a moment and try again.";
+  if (normalized.includes("telemetry") || normalized.includes("robot link")) return "The robot connection is delayed. Check the link and try again.";
+  if (normalized.includes("base station") || normalized.includes("gateway") || normalized.includes("command transport") || normalized.includes("remote fallback")) {
+    return "The control link is not ready. Check the base station and gateway, then try again.";
+  }
+  if (normalized.includes("demo mode")) return "Demo mode is active. Use the Demo Setup controls to build and run the route.";
+  return raw || fallback;
+}
+
 export default function ControllerScreen({
   serverUrl,
   manualServerUrl,
@@ -475,7 +490,7 @@ export default function ControllerScreen({
       setManualControlVisible(true);
       setError(null);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to open manual control");
+      setError(toFriendlyErrorMessage(requestError, "Unable to open manual control"));
     } finally {
       setPendingAction(null);
     }
@@ -652,7 +667,7 @@ export default function ControllerScreen({
       setError(null);
       await refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : `Command failed: ${command}`);
+      setError(toFriendlyErrorMessage(requestError, `Command failed: ${command}`));
     } finally {
       setPendingAction(null);
     }
@@ -673,7 +688,7 @@ export default function ControllerScreen({
       setError(null);
       await refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : `Action failed: ${actionId}`);
+      setError(toFriendlyErrorMessage(requestError, `Action failed: ${actionId}`));
     } finally {
       setPendingAction(null);
     }
@@ -710,7 +725,7 @@ export default function ControllerScreen({
 
   const openPreflight = () => {
     if (demoModeEnabled) {
-      setError("Demo mode is on. Use manual drive for the indoor demo instead of starting a mission.");
+      setError("Demo mode is active. Use the Demo Setup controls below to build and run the route.");
       return;
     }
     setPreflightVisible(true);
@@ -799,7 +814,7 @@ export default function ControllerScreen({
       setError(null);
       await refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to build demo path");
+      setError(toFriendlyErrorMessage(requestError, "Unable to build the demo path"));
     } finally {
       setPendingAction(null);
     }
@@ -816,7 +831,7 @@ export default function ControllerScreen({
       setError(null);
       await refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to run demo path");
+      setError(toFriendlyErrorMessage(requestError, "Unable to run the demo path"));
     } finally {
       setPendingAction(null);
     }
@@ -856,10 +871,10 @@ export default function ControllerScreen({
       const sourceGroup = String(action.group ?? "Operations");
 
       if (kind === "drive" || sourceGroup === "Modes" || sourceGroup === "Drive") {
-        return "LoRa App Commands";
+        return "Drive Controls";
       }
       if (kind === "transport") {
-        return "LoRa Transport";
+        return "Connection Tools";
       }
       return sourceGroup;
     };
@@ -872,8 +887,8 @@ export default function ControllerScreen({
     }
 
     const preferredOrder = [
-      "LoRa App Commands",
-      "LoRa Transport",
+      "Drive Controls",
+      "Connection Tools",
       "Mission",
       "Dispersion",
       "Sensors",
@@ -1128,7 +1143,7 @@ export default function ControllerScreen({
 
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
-      <Text style={[styles.title, { color: theme.title }]}>RAIS Controller</Text>
+      <Text style={[styles.title, { color: theme.title }]}>Robotic Anti-Icing Control</Text>
       <View style={styles.statusRow}>
         <View style={[styles.statusPill, socketState === 'live' ? styles.statusPillLive : styles.statusPillPoll]}>
           <Text style={styles.statusPillText}>{socketState === 'live' ? 'Live' : 'Polling'}</Text>
@@ -1380,14 +1395,14 @@ export default function ControllerScreen({
             <Text style={[styles.quickLabel, { color: theme.muted }]}>Spot A</Text>
             <Text style={[styles.metaText, { color: theme.text }]}>{formatDemoSpot(demoSpots?.start)}</Text>
             {demoSpotGpsStatus?.start?.ready === false ? (
-              <Text style={styles.error}>{demoSpotGpsStatus.start.reason}</Text>
+              <Text style={styles.demoError}>{demoSpotGpsStatus.start.reason}</Text>
             ) : null}
           </View>
           <View style={styles.demoSpotCard}>
             <Text style={[styles.quickLabel, { color: theme.muted }]}>Spot B</Text>
             <Text style={[styles.metaText, { color: theme.text }]}>{formatDemoSpot(demoSpots?.end)}</Text>
             {demoSpotGpsStatus?.end?.ready === false ? (
-              <Text style={styles.error}>{demoSpotGpsStatus.end.reason}</Text>
+              <Text style={styles.demoError}>{demoSpotGpsStatus.end.reason}</Text>
             ) : null}
           </View>
         </View>
@@ -1422,7 +1437,7 @@ export default function ControllerScreen({
               {demoReadiness?.readyToRun ? "Ready to run" : "Not ready"}
             </Text>
             {demoBlockers.length ? demoBlockers.slice(0, 4).map((reason) => (
-              <Text key={reason} style={styles.error}>{reason}</Text>
+              <Text key={reason} style={styles.demoError}>{reason}</Text>
             )) : null}
           </View>
           <View style={styles.demoSpotCard}>
@@ -1433,63 +1448,71 @@ export default function ControllerScreen({
             <Text style={[styles.metaText, { color: theme.text }]}>
               LoRa {demoDiagnostics?.loraDegraded ? "degraded" : "ok"}
             </Text>
-            {demoDiagnostics?.loraLastError ? <Text style={styles.error}>{demoDiagnostics.loraLastError}</Text> : null}
+            {demoDiagnostics?.loraLastError ? <Text style={styles.demoError}>{demoDiagnostics.loraLastError}</Text> : null}
           </View>
         </View>
         <Text style={[styles.quickLabel, { color: theme.muted, marginTop: 8 }]}>Demo Tuning</Text>
-        <View style={styles.opsInputRow}>
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Lane Width (m)</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoLaneWidthInput}
-            onChangeText={setDemoLaneWidthInput}
-            placeholder="Lane m"
-            placeholderTextColor={theme.muted}
-          />
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Geofence Tolerance (m)</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoGeofenceToleranceInput}
-            onChangeText={setDemoGeofenceToleranceInput}
-            placeholder="Fence tol m"
-            placeholderTextColor={theme.muted}
-          />
-        </View>
-        <View style={styles.opsInputRow}>
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Minimum Spot Distance (m)</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoMinSpotDistanceInput}
-            onChangeText={setDemoMinSpotDistanceInput}
-            placeholder="Min spot m"
-            placeholderTextColor={theme.muted}
-          />
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Passes</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoPassesInput}
-            onChangeText={setDemoPassesInput}
-            placeholder="Passes"
-            placeholderTextColor={theme.muted}
-          />
-        </View>
-        <View style={styles.opsInputRow}>
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Obstacle Stop Distance (cm)</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoObstacleStopInput}
-            onChangeText={setDemoObstacleStopInput}
-            placeholder="Stop cm"
-            placeholderTextColor={theme.muted}
-          />
-          <Text style={[styles.demoInputLabel, { color: theme.muted }]}>Obstacle Sidestep Distance (cm)</Text>
-          <TextInput
-            style={[styles.input, styles.opsInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
-            value={demoObstacleSidestepInput}
-            onChangeText={setDemoObstacleSidestepInput}
-            placeholder="Sidestep cm"
-            placeholderTextColor={theme.muted}
-          />
+        <View style={styles.demoTuningGrid}>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Lane Width (m)</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoLaneWidthInput}
+              onChangeText={setDemoLaneWidthInput}
+              placeholder="Lane m"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Geofence Tolerance (m)</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoGeofenceToleranceInput}
+              onChangeText={setDemoGeofenceToleranceInput}
+              placeholder="Fence tol m"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Minimum Spot Distance (m)</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoMinSpotDistanceInput}
+              onChangeText={setDemoMinSpotDistanceInput}
+              placeholder="Min spot m"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Passes</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoPassesInput}
+              onChangeText={setDemoPassesInput}
+              placeholder="Passes"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Obstacle Stop Distance (cm)</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoObstacleStopInput}
+              onChangeText={setDemoObstacleStopInput}
+              placeholder="Stop cm"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
+          <View style={styles.demoTuningField}>
+            <Text style={[styles.demoTuningLabel, { color: theme.muted }]}>Obstacle Sidestep Distance (cm)</Text>
+            <TextInput
+              style={[styles.input, styles.demoTuningInput, { backgroundColor: theme.inputBg, borderColor: theme.inputBorder, color: theme.inputText }]}
+              value={demoObstacleSidestepInput}
+              onChangeText={setDemoObstacleSidestepInput}
+              placeholder="Sidestep cm"
+              placeholderTextColor={theme.muted}
+            />
+          </View>
         </View>
         <View style={styles.demoButtonRow}>
           <AppButton
@@ -2276,6 +2299,30 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     alignItems: "center",
+  },
+  demoTuningGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 8,
+  },
+  demoTuningField: {
+    width: "48%",
+    gap: 4,
+  },
+  demoTuningLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    lineHeight: 14,
+  },
+  demoTuningInput: {
+    minHeight: 42,
+    width: "100%",
+  },
+  demoError: {
+    color: "#b63d3d",
+    marginTop: 2,
+    lineHeight: 16,
   },
   demoInputLabel: {
     width: 118,

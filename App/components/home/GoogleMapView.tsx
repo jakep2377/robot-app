@@ -71,6 +71,7 @@ type PlannerPublicState = {
   robot?: LatLonPayload | null;
   trail?: LatLonPayload[] | null;
   lastPath?: PlannedPoint[] | null;
+  lastArrows?: PlannedPoint[] | null;
 };
 
 type PlannerStateResponse = {
@@ -88,6 +89,7 @@ type PlannerSocketMessage = {
     robot?: LatLonPayload | null;
     trail?: LatLonPayload[] | null;
     points?: PlannedPoint[] | null;
+    arrows?: PlannedPoint[] | null;
   } | null;
   at?: number;
 };
@@ -104,6 +106,7 @@ type PlanningCacheState = {
   selection: RectangleSelection | null;
   baseStation: LatLng | null;
   plannedPath: PlannedCoordinate[];
+  plannedArrows: PlannedCoordinate[];
   plannedPathDistanceM: number;
   coverageCells: CoverageCell[];
   areaSubmitted: boolean;
@@ -167,6 +170,7 @@ let planningCache: PlanningCacheState = {
   selection: null,
   baseStation: null,
   plannedPath: [],
+  plannedArrows: [],
   plannedPathDistanceM: 0,
   coverageCells: [],
   areaSubmitted: false,
@@ -246,6 +250,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const [baseStationPoint, setBaseStationPoint] = useState<LatLng | null>(planningCache.baseStation);
   const [placingBaseStation, setPlacingBaseStation] = useState(false);
   const [plannedPath, setPlannedPath] = useState<PlannedCoordinate[]>(planningCache.plannedPath);
+  const [plannedArrows, setPlannedArrows] = useState<PlannedCoordinate[]>(planningCache.plannedArrows);
   const [plannedPathDistanceM, setPlannedPathDistanceM] = useState(planningCache.plannedPathDistanceM);
   const [coverageCells, setCoverageCells] = useState<CoverageCell[]>(planningCache.coverageCells);
   const [areaSubmitted, setAreaSubmitted] = useState(planningCache.areaSubmitted);
@@ -296,6 +301,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     plannerDraftRef.current = true;
     setBaseStationPoint(coordinate);
     setSelection((current) => (current ? { ...current, baseStation: coordinate } : current));
+    // Base station affects planner start/home; invalidate previously saved area/path.
+    resetPlanningState();
     setPlacingBaseStation(false);
     setBaseStationControlsVisible(false);
     if (!selection) {
@@ -344,6 +351,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const resetPlanningState = () => {
     setAreaSubmitted(false);
     setPlannedPath([]);
+    setPlannedArrows([]);
     setPlannedPathDistanceM(0);
     setCoverageCells([]);
   };
@@ -355,6 +363,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       selection,
       baseStation: baseStationPoint,
       plannedPath,
+      plannedArrows,
       plannedPathDistanceM,
       coverageCells,
       areaSubmitted,
@@ -363,7 +372,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       robotPoint,
       robotTrail,
     };
-  }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType, robotPoint, robotTrail]);
+  }, [drawingMode, firstPoint, selection, baseStationPoint, plannedPath, plannedArrows, plannedPathDistanceM, coverageCells, areaSubmitted, message, mapType, robotPoint, robotTrail]);
 
 
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
@@ -440,141 +449,79 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     if (points.length < 2) return [];
 
     const arrows: PlannedCoordinate[] = [];
-    const totalDistanceM = computePathDistanceMeters(points);
-    const areaScale = Math.max(0, Math.min(2.5, areaM2 / 2500));
-    const arrowsPer100m = 5.0 + (areaScale * 1.5);
-    const rawSpacingM = Math.max(8, Math.min(20, 100 / arrowsPer100m));
-    const spacingM = Math.max(
-      COVERAGE_CELL_SIZE_M,
-      Math.round(rawSpacingM / COVERAGE_CELL_SIZE_M) * COVERAGE_CELL_SIZE_M,
-    );
-    const initialSkipM = totalDistanceM > 80
-      ? Math.max(3, spacingM * 0.2)
-      : Math.min(1.2, spacingM * 0.2);
-    const edgeInsetM = Math.min(6, Math.max(1.0, spacingM * 0.18));
-    const minStraightRunM = Math.max(1.2, spacingM * 0.08);
+    const spacingM = areaM2 > 5000 ? 12 : areaM2 > 1600 ? 10 : 8;
+    const minArrowSeparationM = Math.max(3.2, spacingM * 0.55);
     const quantizeHeadingDeg = (heading: number) => Math.round(heading / 5) * 5;
 
-    const segments: Array<{
-      from: PlannedCoordinate;
-      to: PlannedCoordinate;
-      startM: number;
-      endM: number;
-      lenM: number;
-      headingDeg: number | null;
-    }> = [];
+    const resolveLeftToRightHeadingDeg = () => {
+      const boundary = selection?.boundary;
+      if (!boundary || boundary.length < 2) return 90;
+      const edgeHeading = computeHeadingBetweenPoints(boundary[0], boundary[1]);
+      if (edgeHeading == null) return 90;
+      const forward = normalizeHeadingDeg(edgeHeading) ?? 90;
+      const reverse = normalizeHeadingDeg(forward + 180) ?? forward;
+      const forwardToEast = headingDeltaDeg(forward, 90) ?? 180;
+      const reverseToEast = headingDeltaDeg(reverse, 90) ?? 180;
+      return forwardToEast <= reverseToEast ? forward : reverse;
+    };
 
-    let cursorM = 0;
+    const laneHeadingDeg = resolveLeftToRightHeadingDeg();
+
+    const segments: Array<{ from: PlannedCoordinate; to: PlannedCoordinate; lenM: number }> = [];
     for (let i = 0; i < points.length - 1; i += 1) {
       const from = points[i];
       const to = points[i + 1];
       const lenM = haversineDistanceMeters(from, to);
-      if (lenM < 0.05) continue;
-      const headingDeg = computeHeadingBetweenPoints(from, to);
-      const startM = cursorM;
-      const endM = startM + lenM;
-      segments.push({ from, to, startM, endM, lenM, headingDeg });
-      cursorM = endM;
+      if (!Number.isFinite(lenM) || lenM <= 0.01) continue;
+      segments.push({ from, to, lenM });
     }
 
-    if (segments.length === 0) return arrows;
+    if (segments.length === 0) return [];
 
-    const runs: Array<{
-      startM: number;
-      endM: number;
-      lenM: number;
-      headingDeg: number;
-    }> = [];
+    const totalLenM = segments.reduce((sum, segment) => sum + segment.lenM, 0);
+    const initialOffsetM = Math.min(0.8, spacingM * 0.2);
 
-    for (let i = 0; i < segments.length; i += 1) {
-      const segment = segments[i];
-      if (segment.headingDeg == null) continue;
-      const lastRun = runs[runs.length - 1];
-      if (!lastRun) {
-        runs.push({
-          startM: segment.startM,
-          endM: segment.endM,
-          lenM: segment.lenM,
-          headingDeg: quantizeHeadingDeg(segment.headingDeg),
-        });
-        continue;
+    let segmentIndex = 0;
+    let segmentStartDistM = 0;
+
+    for (let targetDistM = initialOffsetM; targetDistM < totalLenM; targetDistM += spacingM) {
+      while (
+        segmentIndex < segments.length - 1
+        && (segmentStartDistM + segments[segmentIndex].lenM) < targetDistM
+      ) {
+        segmentStartDistM += segments[segmentIndex].lenM;
+        segmentIndex += 1;
       }
 
-      const headingDiff = headingDeltaDeg(lastRun.headingDeg, segment.headingDeg) ?? 180;
-      if (headingDiff <= 24) {
-        lastRun.endM = segment.endM;
-        lastRun.lenM = lastRun.endM - lastRun.startM;
-        continue;
-      }
+      const segment = segments[segmentIndex];
+      const distIntoSegmentM = Math.max(0, targetDistM - segmentStartDistM);
+      const t = Math.max(0, Math.min(1, distIntoSegmentM / segment.lenM));
+      const arrowHeadingDeg = laneHeadingDeg;
 
-      runs.push({
-        startM: segment.startM,
-        endM: segment.endM,
-        lenM: segment.lenM,
-        headingDeg: quantizeHeadingDeg(segment.headingDeg),
-      });
-    }
+      const nextArrow: PlannedCoordinate = {
+        latitude: segment.from.latitude + ((segment.to.latitude - segment.from.latitude) * t),
+        longitude: segment.from.longitude + ((segment.to.longitude - segment.from.longitude) * t),
+        headingDeg: quantizeHeadingDeg(arrowHeadingDeg),
+      };
 
-    if (runs.length === 0) return arrows;
+      const touchesExisting = arrows.some((existing) => (
+        haversineDistanceMeters(existing, nextArrow) < minArrowSeparationM
+      ));
+      if (touchesExisting) continue;
 
-    const totalUsableDistanceM = segments[segments.length - 1].endM;
-    const clampDistance = (value: number) => Math.max(0, Math.min(totalUsableDistanceM, value));
-
-    const pointAtDistance = (distanceM: number): PlannedCoordinate => {
-      const d = clampDistance(distanceM);
-      for (let i = 0; i < segments.length; i += 1) {
-        const segment = segments[i];
-        if (d > segment.endM && i < segments.length - 1) continue;
-        const local = d - segment.startM;
-        const t = segment.lenM > 0 ? Math.max(0, Math.min(1, local / segment.lenM)) : 0;
-        return {
-          latitude: segment.from.latitude + ((segment.to.latitude - segment.from.latitude) * t),
-          longitude: segment.from.longitude + ((segment.to.longitude - segment.from.longitude) * t),
-          headingDeg: null,
-        };
-      }
-      const last = segments[segments.length - 1].to;
-      return { latitude: last.latitude, longitude: last.longitude, headingDeg: null };
-    };
-
-    const startM = Math.max(initialSkipM, edgeInsetM);
-
-    for (const run of runs) {
-      if (run.endM < startM) continue;
-      if (run.lenM < minStraightRunM) continue;
-
-      const runInsetM = Math.min(edgeInsetM, Math.max(0.6, run.lenM * 0.18));
-      const laneStartM = Math.max(run.startM + runInsetM, startM);
-      const laneEndM = run.endM - runInsetM;
-      const usableLenM = laneEndM - laneStartM;
-      if (usableLenM < 0.8) continue;
-
-      const count = usableLenM <= spacingM
-        ? 1
-        : Math.max(1, Math.floor(usableLenM / spacingM));
-      const slotM = usableLenM / (count + 1);
-
-      for (let i = 1; i <= count; i += 1) {
-        const d = laneStartM + (slotM * i);
-        const point = pointAtDistance(d);
-        arrows.push({
-          latitude: point.latitude,
-          longitude: point.longitude,
-          headingDeg: run.headingDeg,
-        });
-      }
+      arrows.push(nextArrow);
     }
 
     if (arrows.length === 0) {
-      const fallbackRun = runs.reduce((best, run) => (run.lenM > best.lenM ? run : best), runs[0]);
-      const fallbackDistanceM = fallbackRun.startM + (fallbackRun.lenM * 0.5);
-      const point = pointAtDistance(fallbackDistanceM);
-      const headingDeg = fallbackRun.headingDeg ?? computeHeadingBetweenPoints(segments[0].from, segments[0].to);
+      const from = points[0];
+      const to = points[1];
+      const headingDeg = normalizeHeadingDeg(from.headingDeg ?? to.headingDeg ?? computeHeadingBetweenPoints(from, to));
       if (headingDeg != null) {
+        const arrowHeadingDeg = laneHeadingDeg;
         arrows.push({
-          latitude: point.latitude,
-          longitude: point.longitude,
-          headingDeg,
+          latitude: (from.latitude + to.latitude) * 0.5,
+          longitude: (from.longitude + to.longitude) * 0.5,
+          headingDeg: quantizeHeadingDeg(arrowHeadingDeg),
         });
       }
     }
@@ -615,17 +562,59 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
     return cleaned;
   };
-  const diagonalCross = (base: LatLng, goal: LatLng, point: LatLng) => (
-    (goal.longitude - base.longitude) * (point.latitude - base.latitude) -
-    (goal.latitude - base.latitude) * (point.longitude - base.longitude)
-  );
 
-  const orderBoundaryPoints = (base: LatLng, goal: LatLng, sideA: LatLng, sideB: LatLng): LatLng[] => {
-    const crossA = diagonalCross(base, goal, sideA);
-    const crossB = diagonalCross(base, goal, sideB);
-    if (crossA === 0 && crossB === 0) return [base, sideA, goal, sideB];
-    if (crossA * crossB < 0) return crossA > 0 ? [base, sideA, goal, sideB] : [base, sideB, goal, sideA];
-    return [base, sideA, goal, sideB];
+  const normalizeBoundaryPoints = (boundary: LatLng[], anchor: LatLng | null = null): LatLng[] => {
+    if (boundary.length < 4) return boundary;
+
+    const unique: LatLng[] = [];
+    for (const point of boundary) {
+      if (!Number.isFinite(point.latitude) || !Number.isFinite(point.longitude)) continue;
+      const duplicate = unique.some((candidate) => haversineDistanceMeters(candidate, point) < 0.2);
+      if (!duplicate) unique.push(point);
+    }
+
+    if (unique.length < 4) return boundary.slice(0, 4);
+    const quad = unique.slice(0, 4);
+
+    const centroid = quad.reduce(
+      (acc, point) => ({
+        latitude: acc.latitude + point.latitude,
+        longitude: acc.longitude + point.longitude,
+      }),
+      { latitude: 0, longitude: 0 },
+    );
+    centroid.latitude /= quad.length;
+    centroid.longitude /= quad.length;
+
+    const sorted = [...quad].sort((a, b) => {
+      const angleA = Math.atan2(a.latitude - centroid.latitude, a.longitude - centroid.longitude);
+      const angleB = Math.atan2(b.latitude - centroid.latitude, b.longitude - centroid.longitude);
+      return angleA - angleB;
+    });
+
+    const signedArea = sorted.reduce((acc, point, index) => {
+      const next = sorted[(index + 1) % sorted.length];
+      return acc + ((point.longitude * next.latitude) - (next.longitude * point.latitude));
+    }, 0);
+    const ccw = signedArea > 0 ? sorted : [...sorted].reverse();
+
+    const reference = anchor ?? boundary[0] ?? ccw[0];
+    let startIndex = 0;
+    let minDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < ccw.length; i += 1) {
+      const distance = haversineDistanceMeters(reference, ccw[i]);
+      if (distance < minDistance) {
+        minDistance = distance;
+        startIndex = i;
+      }
+    }
+
+    return [
+      ccw[startIndex],
+      ccw[(startIndex + 1) % ccw.length],
+      ccw[(startIndex + 2) % ccw.length],
+      ccw[(startIndex + 3) % ccw.length],
+    ];
   };
 
   const cornerLabels = ['Base Corner', 'Boundary Corner', 'Goal Corner', 'Boundary Corner'];
@@ -633,7 +622,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const updateSelectionFromBoundary = (boundary: LatLng[]) => {
     if (boundary.length !== 4) return;
     plannerDraftRef.current = true;
-    const normalizedBoundary = orderBoundaryPoints(boundary[0], boundary[2], boundary[1], boundary[3]);
+    const normalizedBoundary = normalizeBoundaryPoints(boundary, baseStationPoint ?? selection?.baseStation ?? null);
     setSelection({ boundary: normalizedBoundary, baseStation: baseStationPoint ?? normalizedBoundary[0], goal: normalizedBoundary[2] });
     resetPlanningState();
   };
@@ -648,12 +637,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     }
     plannerDraftRef.current = true;
     const secondPoint = corner;
-    const boundary = orderBoundaryPoints(
+    const boundary = normalizeBoundaryPoints([
       firstPoint,
-      secondPoint,
       { latitude: firstPoint.latitude, longitude: secondPoint.longitude },
+      secondPoint,
       { latitude: secondPoint.latitude, longitude: firstPoint.longitude },
-    );
+    ], baseStationPoint ?? firstPoint);
     const nextSelection = { baseStation: baseStationPoint ?? firstPoint, goal: boundary[2], boundary };
     setSelection(nextSelection);
     resetPlanningState();
@@ -815,9 +804,19 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     const nextBoundary = preserveLocalPlanning
       ? (selection?.boundary ?? [])
       : (includePlanningState ? toLatLngPoints(remoteState.boundary).slice(0, 4) : []);
+    const normalizedRemoteBoundary = nextBoundary.length === 4
+      ? normalizeBoundaryPoints(nextBoundary, nextBaseStation ?? null)
+      : nextBoundary;
     const nextPlannedPath = preserveLocalPlanning
       ? plannedPath
-      : (includePlanningState ? sanitizePlannedPath(toPlannedCoordinates(remoteState.lastPath)) : []);
+      : (includePlanningState
+          ? sanitizePlannedPath(toPlannedCoordinates(remoteState.lastPath))
+          : []);
+    const nextPlannedArrows = preserveLocalPlanning
+      ? plannedArrows
+      : (includePlanningState
+          ? toPlannedCoordinates(remoteState.lastArrows)
+          : []);
     const nextRobotPoint = toLatLngPoint(remoteState.robot);
     const nextRobotTrail = toLatLngPoints(remoteState.trail);
 
@@ -834,11 +833,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       setMapCenter(nextBaseStation);
     }
 
-    if (nextBoundary.length === 4) {
+    if (normalizedRemoteBoundary.length === 4) {
       setSelection({
-        boundary: nextBoundary,
-        baseStation: nextBaseStation ?? nextBoundary[0],
-        goal: nextBoundary[2],
+        boundary: normalizedRemoteBoundary,
+        baseStation: nextBaseStation ?? normalizedRemoteBoundary[0],
+        goal: normalizedRemoteBoundary[2],
       });
       setAreaSubmitted(true);
       void loadCoverageGrid(true);
@@ -850,6 +849,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
     if (includePlanningState && !preserveLocalPlanning) {
       setPlannedPath(nextPlannedPath);
+      setPlannedArrows(nextPlannedArrows);
       setPlannedPathDistanceM(computePathDistanceMeters(nextPlannedPath));
     }
     setRobotPoint(nextRobotPoint);
@@ -857,7 +857,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
     if (!preserveLocalPlanning && includePlanningState && nextPlannedPath.length > 1) {
       setMessage(`Saved route loaded: ${nextPlannedPath.length} points over ${(computePathDistanceMeters(nextPlannedPath) / 1000).toFixed(2)} km.`);
-    } else if (includePlanningState && nextBoundary.length === 4) {
+    } else if (includePlanningState && normalizedRemoteBoundary.length === 4) {
       setMessage('Saved service area loaded. You can adjust it or build the route again.');
     } else if (nextBaseStation) {
       setMessage('Base station loaded. Tap the map to outline the service area.');
@@ -868,8 +868,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     if (fitToState) {
       const focusPoints = nextPlannedPath.length > 1
         ? nextPlannedPath.map((point) => ({ latitude: point.latitude, longitude: point.longitude }))
-        : nextBoundary.length === 4
-          ? nextBoundary
+        : normalizedRemoteBoundary.length === 4
+          ? normalizedRemoteBoundary
           : nextBaseStation
             ? [nextBaseStation]
             : nextRobotPoint
@@ -898,6 +898,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     setPlannerReady(false);
     setSelection(null);
     setPlannedPath([]);
+    setPlannedArrows([]);
     setPlannedPathDistanceM(0);
     setCoverageCells([]);
     setAreaSubmitted(false);
@@ -925,7 +926,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         if (message.event === 'path.updated') {
           const nextPath = sanitizePlannedPath(toPlannedCoordinates(message.payload?.points));
+          const nextArrows = toPlannedCoordinates(message.payload?.arrows);
           setPlannedPath(nextPath);
+          setPlannedArrows(nextArrows);
           setPlannedPathDistanceM(computePathDistanceMeters(nextPath));
           if (nextPath.length > 1) {
             setMessage(`Route ready: ${nextPath.length} points over ${(computePathDistanceMeters(nextPath) / 1000).toFixed(2)} km.`);
@@ -965,10 +968,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
     try {
       const cellSizeM = resolvePlanningCellSizeM();
+      const normalizedBoundary = normalizeBoundaryPoints(selection.boundary, resolvedBaseStation);
       await postJson(serverUrl, '/api/input-area', {
         baseStation: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
         homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-        boundary: selection.boundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
+        boundary: normalizedBoundary.map((point) => ({ lat: point.latitude, lon: point.longitude })),
         cellSizeM,
       });
       plannerDraftRef.current = false;
@@ -1004,18 +1008,22 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
     }
     setBusy('path');
     try {
+      const normalizedBoundary = normalizeBoundaryPoints(selection.boundary, resolvedBaseStation);
+      const normalizedGoal = normalizedBoundary[2] ?? selection.goal;
+
       if (!areaSubmitted) {
         const saved = await saveAreaToServer();
         if (!saved) return;
       }
 
-      let result: { ok: boolean; points: PlannedPoint[]; mode?: string | null };
+      let result: { ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null };
       let routeModeLabel = 'coverage route';
       try {
-        result = await postJson<{ ok: boolean; points: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+        result = await postJson<{ ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
           mode: 'coverage',
+          sweepDirection: 'leftToRight',
           start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-          goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
+          goal: { lat: normalizedGoal.latitude, lon: normalizedGoal.longitude },
           homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
           coverageWidthM: 0.5,
           returnToBase: false,
@@ -1023,10 +1031,22 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
           brinePct,
         });
       } catch (coverageError) {
-        result = await postJson<{ ok: boolean; points: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+        const errorMessage = String((coverageError as Error)?.message ?? '');
+        const normalizedError = errorMessage.toLowerCase();
+        const allowGoalFallback =
+          normalizedError.includes('coverage not supported') ||
+          normalizedError.includes('unsupported mode') ||
+          normalizedError.includes('mode must be') ||
+          normalizedError.includes('422');
+
+        if (!allowGoalFallback) {
+          throw coverageError;
+        }
+
+        result = await postJson<{ ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
           mode: 'goal',
           start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
-          goal: { lat: selection.goal.latitude, lon: selection.goal.longitude },
+          goal: { lat: normalizedGoal.latitude, lon: normalizedGoal.longitude },
           homePoint: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
           returnToBase: false,
           saltPct,
@@ -1039,8 +1059,15 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
         longitude: point.lon,
         headingDeg: point.headingDeg ?? null,
       })));
+      const arrows = toPlannedCoordinates(result?.arrows);
+
+      if (points.length < 2) {
+        throw new Error('Planner returned too few points to build a usable route.');
+      }
+
       plannerDraftRef.current = false;
       setPlannedPath(points);
+      setPlannedArrows(arrows);
       const totalDistance = computePathDistanceMeters(points);
       setPlannedPathDistanceM(totalDistance);
       await loadCoverageGrid(true);
@@ -1062,6 +1089,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
       }
     } catch (requestError) {
       setPlannedPath([]);
+      setPlannedArrows([]);
       setPlannedPathDistanceM(0);
       setMessage(requestError instanceof Error ? requestError.message : 'Route planning failed.');
     } finally {
@@ -1073,7 +1101,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
   const routeStrokeWidth = areaM2 > 5000 ? 3.4 : areaM2 > 1600 ? 3.0 : 2.6;
   const routeHaloWidth = routeStrokeWidth + 1.8;
   const arrowSize = areaM2 > 5000 ? 20 : areaM2 > 1600 ? 17 : 15;
-  const pathArrowPoints = buildPathArrowPoints(plannedPath, areaM2);
+  const pathArrowPoints = plannedArrows;
   const activeBaseStation = baseStationPoint ?? selection?.baseStation ?? null;
 
   return (
@@ -1388,7 +1416,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct }: Props) {
 
         {plannedPath.length > 1 ? (
           <Text style={styles.pathMetaText}>
-            Route: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Arrows {pathArrowPoints.length} • Area {Math.round(areaM2)} m²
+            Route: {plannedPath.length} points • {(plannedPathDistanceM / 1000).toFixed(2)} km • Area {Math.round(areaM2)} m²
           </Text>
         ) : selection ? (
           <Text style={styles.pathMetaText}>
