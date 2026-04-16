@@ -312,7 +312,7 @@ type Props = {
   setSaltPct: (value: number) => void;
   setBrinePct: (value: number) => void;
   connectionLabel: string;
-  connectionStatus: 'connecting' | 'connected' | 'fallback' | 'error';
+  connectionStatus: 'idle' | 'connecting' | 'connected' | 'fallback' | 'error';
   connectionDetail: string;
   connectionMode: 'discovering' | 'local' | 'cloud' | 'manual';
   connectionBusy: boolean;
@@ -413,6 +413,7 @@ function toFriendlyErrorMessage(error: unknown, fallback: string): string {
   if (!raw) return fallback;
   if (normalized.includes("waypoint")) return "The route is still syncing to the robot. Please wait a moment and try again.";
   if (normalized.includes("gps")) return "The robot is still acquiring its position. Please wait a moment and try again.";
+  if (normalized.includes("timeout") || normalized.includes("timed out") || normalized.includes("socket")) return "The request took too long to finish. Keep the robot link active and try again.";
   if (normalized.includes("telemetry") || normalized.includes("robot link")) return "The robot connection is delayed. Check the link and try again.";
   if (normalized.includes("base station") || normalized.includes("gateway") || normalized.includes("command transport") || normalized.includes("remote fallback")) {
     return "The control link is not ready. Check the base station and gateway, then try again.";
@@ -468,6 +469,7 @@ export default function ControllerScreen({
 
 
   const resolvedManualServerUrl = (manualServerUrl && manualServerUrl.trim()) || "";
+  const serverReachable = connectionStatus === "connected" || connectionStatus === "fallback";
 
   const verifyManualGateway = async () => {
     if (!resolvedManualServerUrl) return false;
@@ -526,6 +528,12 @@ export default function ControllerScreen({
   };
 
   const refresh = useCallback(async () => {
+    if (!serverReachable) {
+      if (isMounted.current) {
+        setSocketState("polling");
+      }
+      return;
+    }
     if (refreshInFlight.current) {
       refreshQueued.current = true;
       return;
@@ -586,7 +594,7 @@ export default function ControllerScreen({
         }, 75);
       }
     }
-  }, [serverUrl]);
+  }, [serverReachable, serverUrl]);
 
   const requestRefresh = useCallback(() => {
     if (refreshInFlight.current) {
@@ -597,12 +605,21 @@ export default function ControllerScreen({
   }, [refresh]);
 
   useEffect(() => {
+    if (!serverReachable) {
+      setSocketState("polling");
+      return;
+    }
     requestRefresh();
     const timer = setInterval(requestRefresh, 1200);
     return () => clearInterval(timer);
-  }, [requestRefresh]);
+  }, [requestRefresh, serverReachable]);
 
   useEffect(() => {
+    if (!serverReachable) {
+      setSocketState("polling");
+      return;
+    }
+
     const socket = new WebSocket(toWebSocketUrl(serverUrl));
 
     socket.onopen = () => setSocketState("live");
@@ -642,7 +659,7 @@ export default function ControllerScreen({
     return () => {
       socket.close();
     };
-  }, [serverUrl, requestRefresh]);
+  }, [serverReachable, serverUrl, requestRefresh]);
 
   useEffect(() => {
     const cfg = summary?.demo?.config;
@@ -806,15 +823,18 @@ export default function ControllerScreen({
     }
   };
 
-  const buildDemoPath = async (allowWeakGps = false) => {
+  const buildDemoPath = async (allowWeakGps?: boolean) => {
     setPendingAction(allowWeakGps ? "demo-path-override" : "demo-path");
     try {
-      const response = await postJson<{ warnings?: string[] }>(serverUrl, "/api/demo-mode/path", {
+      const payload: Record<string, unknown> = {
         source: "app.controller",
         saltPct,
         brinePct,
-        allowWeakGps,
-      });
+      };
+      if (allowWeakGps === true) {
+        payload.allowWeakGps = true;
+      }
+      const response = await postJson<{ warnings?: string[] }>(serverUrl, "/api/demo-mode/path", payload, 25000);
       setTestResult(Array.isArray(response?.warnings) && response.warnings.length ? response.warnings.join(" ") : null);
       setError(null);
       await refresh();
@@ -831,7 +851,7 @@ export default function ControllerScreen({
       await postJson(serverUrl, "/api/demo-mode/run", {
         source: "app.controller",
         allowWeakGps,
-      });
+      }, 25000);
       setTestResult(null);
       setError(null);
       await refresh();

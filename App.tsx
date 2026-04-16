@@ -56,7 +56,7 @@ type ConnectionState = {
   serverUrl: string;
   mode: ConnectionMode;
   label: string;
-  status: 'connecting' | 'connected' | 'fallback' | 'error';
+  status: 'idle' | 'connecting' | 'connected' | 'fallback' | 'error';
   detail: string;
 };
 
@@ -71,17 +71,35 @@ async function pickFirstHealthy(urls: string[], timeoutMs: number) {
 }
 
 async function discoverBestServer() {
+  const localCandidates = uniqueUrls(LOCAL_SERVER_CANDIDATES);
+  const { success: localSuccess, results: localResults } = localCandidates.length
+    ? await pickFirstHealthy(localCandidates, 1400)
+    : { success: null, results: [] as ServerProbeResult[] };
+
+  if (localSuccess) {
+    return {
+      state: {
+        serverUrl: localSuccess.serverUrl,
+        mode: 'local' as const,
+        label: 'Local server',
+        status: 'connected' as const,
+        detail: `Connected to the local server in ${localSuccess.latencyMs} ms`,
+      },
+      probes: localResults,
+    };
+  }
+
   const cloud = await probeServer(DEFAULT_CLOUD_SERVER_URL, 2600);
   if (cloud.ok) {
     return {
       state: {
-        serverUrl: DEFAULT_CLOUD_SERVER_URL,
+        serverUrl: cloud.serverUrl,
         mode: 'cloud' as const,
         label: 'Remote server',
         status: 'connected' as const,
         detail: `Connected to the hosted server in ${cloud.latencyMs} ms`,
       },
-      probes: [cloud],
+      probes: [...localResults, cloud],
     };
   }
 
@@ -89,11 +107,11 @@ async function discoverBestServer() {
     state: {
       serverUrl: DEFAULT_CLOUD_SERVER_URL,
       mode: 'cloud' as const,
-      label: 'Remote server offline',
+      label: 'Server offline',
       status: 'error' as const,
-      detail: 'The hosted server could not be reached right now.',
+      detail: 'No reachable local or remote server was found.',
     },
-    probes: [cloud],
+    probes: [...localResults, cloud],
   };
 }
 
@@ -101,10 +119,10 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_CLOUD_SERVER_URL);
   const [connection, setConnection] = useState<ConnectionState>({
     serverUrl: DEFAULT_CLOUD_SERVER_URL,
-    mode: 'discovering',
-    label: 'Checking server connection',
-    status: 'connecting',
-    detail: 'Connecting to the remote server.',
+    mode: 'cloud',
+    label: 'Server check ready',
+    status: 'idle',
+    detail: 'The app will wait until you check the server connection.',
   });
   const [manualServerUrl, setManualServerUrl] = useState(DEFAULT_MANUAL_GATEWAY_URL);
   const [connectionModalVisible, setConnectionModalVisible] = useState(false);
@@ -128,11 +146,11 @@ export default function App() {
     try {
       const result = await discoverBestServer();
       setConnection(result.state);
-      setServerUrl(DEFAULT_CLOUD_SERVER_URL);
+      setServerUrl(result.state.serverUrl);
       setManualServerUrl(DEFAULT_MANUAL_GATEWAY_URL);
       if (result.state.status === 'error') {
-        const probe = result.probes[0];
-        setConnectionError(probe?.error ?? 'Unable to reach the hosted server.');
+        const failedProbe = result.probes.find((probe) => !probe.ok);
+        setConnectionError(failedProbe?.error ?? 'Unable to reach a local or hosted server.');
       }
     } finally {
       setConnectionBusy(false);

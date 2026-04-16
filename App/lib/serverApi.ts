@@ -87,14 +87,27 @@ export type BaseStationSetupProbeResult = {
 };
 
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 5000) {
+0  const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? Math.max(1000, Math.round(timeoutMs)) : 5000;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
 
   try {
     return await fetch(input, {
       ...init,
       signal: controller.signal,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? 'Network request failed');
+    const normalized = message.toLowerCase();
+    if (
+      normalized.includes('abort')
+      || normalized.includes('timeout')
+      || normalized.includes('timed out')
+      || normalized.includes('socket')
+    ) {
+      throw new Error(`Request timed out after ${Math.max(1, Math.round(effectiveTimeoutMs / 1000))} seconds`);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -280,12 +293,12 @@ async function readBody(response: Response) {
   return text.trim();
 }
 
-export async function getJson<T>(serverUrl: string, path: string): Promise<T> {
+export async function getJson<T>(serverUrl: string, path: string, timeoutMs = 8000): Promise<T> {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     headers: {
       ...buildAuthHeaders(),
     },
-  }, 5000);
+  }, timeoutMs);
   const text = await readBody(response);
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
@@ -293,12 +306,12 @@ export async function getJson<T>(serverUrl: string, path: string): Promise<T> {
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
-export async function getJsonAllowError<T>(serverUrl: string, path: string): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
+export async function getJsonAllowError<T>(serverUrl: string, path: string, timeoutMs = 8000): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     headers: {
       ...buildAuthHeaders(),
     },
-  }, 5000);
+  }, timeoutMs);
 
   const text = await readBody(response);
   let data: T | null = null;
@@ -318,12 +331,12 @@ export async function getJsonAllowError<T>(serverUrl: string, path: string): Pro
   };
 }
 
-export async function getGatewayJsonAllowError<T>(gatewayUrl: string, path: string): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
+export async function getGatewayJsonAllowError<T>(gatewayUrl: string, path: string, timeoutMs = 8000): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
   const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
     headers: {
       ...buildAuthHeaders(),
     },
-  }, 5000);
+  }, timeoutMs);
 
   const text = await readBody(response);
   let data: T | null = null;
@@ -343,7 +356,7 @@ export async function getGatewayJsonAllowError<T>(gatewayUrl: string, path: stri
   };
 }
 
-export async function postJson<T>(serverUrl: string, path: string, body: unknown): Promise<T> {
+export async function postJson<T>(serverUrl: string, path: string, body: unknown, timeoutMs = 15000): Promise<T> {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     method: "POST",
     headers: {
@@ -351,7 +364,7 @@ export async function postJson<T>(serverUrl: string, path: string, body: unknown
       ...buildAuthHeaders(),
     },
     body: JSON.stringify(body),
-  }, 7000);
+  }, timeoutMs);
   const text = await readBody(response);
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
@@ -359,7 +372,7 @@ export async function postJson<T>(serverUrl: string, path: string, body: unknown
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
-export async function postText(serverUrl: string, path: string, body: string) {
+export async function postText(serverUrl: string, path: string, body: string, timeoutMs = 10000) {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     method: "POST",
     headers: {
@@ -367,7 +380,7 @@ export async function postText(serverUrl: string, path: string, body: string) {
       ...buildAuthHeaders(),
     },
     body: JSON.stringify({ cmd: body }),
-  }, 7000);
+  }, timeoutMs);
   const text = await readBody(response);
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
@@ -375,7 +388,7 @@ export async function postText(serverUrl: string, path: string, body: string) {
   return text;
 }
 
-export async function postGatewayText(gatewayUrl: string, path: string, body: string) {
+export async function postGatewayText(gatewayUrl: string, path: string, body: string, timeoutMs = 10000) {
   const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
     method: "POST",
     headers: {
@@ -383,7 +396,7 @@ export async function postGatewayText(gatewayUrl: string, path: string, body: st
       ...buildAuthHeaders(),
     },
     body: JSON.stringify({ cmd: body }),
-  }, 7000);
+  }, timeoutMs);
   const text = await readBody(response);
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
@@ -391,7 +404,7 @@ export async function postGatewayText(gatewayUrl: string, path: string, body: st
   return text;
 }
 
-export async function postGatewayPlainText(gatewayUrl: string, path: string, body: string, timeoutMs = 2500) {
+export async function postGatewayPlainText(gatewayUrl: string, path: string, body: string, timeoutMs = 8000) {
   const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
     method: "POST",
     headers: {
@@ -407,7 +420,7 @@ export async function postGatewayPlainText(gatewayUrl: string, path: string, bod
   return text;
 }
 
-export async function postPlainText(serverUrl: string, path: string, body: string, timeoutMs = 2500) {
+export async function postPlainText(serverUrl: string, path: string, body: string, timeoutMs = 8000) {
   const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
     method: "POST",
     headers: {
