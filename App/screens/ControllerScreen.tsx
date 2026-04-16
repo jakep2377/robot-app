@@ -10,7 +10,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { getGatewayJsonAllowError, getJson, getJsonAllowError, postGatewayText, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
+import { getGatewayJsonAllowError, getJsonAllowError, postGatewayText, postJson, postText, toWebSocketUrl } from "../lib/serverApi";
 import PercentSlider from "../components/common/PercentSlider";
 import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
@@ -448,6 +448,7 @@ export default function ControllerScreen({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [socketState, setSocketState] = useState("polling");
   const [manualControlVisible, setManualControlVisible] = useState(false);
+  const [manualGatewayConnected, setManualGatewayConnected] = useState(false);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
   const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
   const [preflightVisible, setPreflightVisible] = useState(false);
@@ -477,14 +478,18 @@ export default function ControllerScreen({
   const openManualControl = async () => {
     setPendingAction("manual-open");
     try {
+      setManualControlVisible(true);
+
       if (!resolvedManualServerUrl) {
         setError("Gateway manual URL is not set. Expected default: http://172.20.10.2");
         return;
       }
-      const ready = await verifyManualGateway();
-      if (!ready) {
-        setError(`Gateway manual server is not reachable at ${resolvedManualServerUrl}`);
-        return;
+
+      try {
+        await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
+        setError(null);
+      } catch (requestError) {
+        setError(requestError instanceof Error ? requestError.message : "Manual mode command could not be sent");
       }
       await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
       setManualControlVisible(true);
@@ -502,7 +507,7 @@ export default function ControllerScreen({
       await postGatewayText(resolvedManualServerUrl, "/command", "STOP");
       await postGatewayText(resolvedManualServerUrl, "/command", "PAUSE");
     } catch {
-      // best effort safety stop
+      // Ignore errors on close
     }
   };
 
@@ -1141,6 +1146,40 @@ export default function ControllerScreen({
     setConnectionExpanded(shouldHighlightConnection);
   }, [shouldHighlightConnection]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkGateway = async () => {
+      if (!resolvedManualServerUrl) {
+        if (!cancelled) {
+          setManualGatewayConnected(false);
+        }
+        return;
+      }
+
+      try {
+        const connected = await verifyManualGateway();
+        if (!cancelled) {
+          setManualGatewayConnected(connected);
+        }
+      } catch {
+        if (!cancelled) {
+          setManualGatewayConnected(false);
+        }
+      }
+    };
+
+    void checkGateway();
+    const timer = setInterval(() => {
+      void checkGateway();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [resolvedManualServerUrl]);
+
   return (
     <ScrollView contentContainerStyle={[styles.container, { backgroundColor: theme.pageBg, paddingTop: insets.top + 8 }]}> 
       <Text style={[styles.title, { color: theme.title }]}>Robotic Anti-Icing Control</Text>
@@ -1306,6 +1345,23 @@ export default function ControllerScreen({
 
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
+        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Material Mix</Text>
+        <PercentSlider
+          label="Salt"
+          value={saltPct}
+          onChange={setSaltPct}
+          accentColor="#2d8a65"
+        />
+
+        <PercentSlider
+          label="Brine"
+          value={brinePct}
+          onChange={setBrinePct}
+          accentColor="#2c6fb7"
+        />
+      </AppCard>
+
+      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Run Controls</Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>Commit the route, then use Start Auto to review checks and begin the run.</Text>
         <Text style={[styles.metaText, { color: theme.muted }]}>Long paths are committed in local batches capped at 120 waypoints.</Text>
@@ -1325,24 +1381,20 @@ export default function ControllerScreen({
         </View>
 
         <Text style={[styles.sectionTitle, { color: theme.sectionTitle, marginTop: 8 }]}>Manual Control</Text>
-        <AppButton label="Open Manual Control" onPress={openManualControl} style={styles.secondaryButton} />
-      </AppCard>
-
-      <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
-        <Text style={[styles.sectionTitle, { color: theme.sectionTitle }]}>Material Mix</Text>
-        <PercentSlider
-          label="Salt"
-          value={saltPct}
-          onChange={setSaltPct}
-          accentColor="#2d8a65"
-        />
-
-        <PercentSlider
-          label="Brine"
-          value={brinePct}
-          onChange={setBrinePct}
-          accentColor="#2c6fb7"
-        />
+        <View style={styles.manualControlRow}>
+          <AppButton label="Open Manual Control" onPress={openManualControl} style={styles.manualControlButton} />
+          <View style={styles.manualGatewayStatus}>
+            <View
+              style={[
+                styles.manualGatewayDot,
+                manualGatewayConnected ? styles.manualGatewayDotConnected : styles.manualGatewayDotDisconnected,
+              ]}
+            />
+            <Text style={[styles.manualGatewayText, { color: theme.muted }]}>
+              {manualGatewayConnected ? "Connected" : "Disconnected"}
+            </Text>
+          </View>
+        </View>
       </AppCard>
 
       <AppCard style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}> 
@@ -1717,6 +1769,8 @@ export default function ControllerScreen({
         setJoystickState={setJoystickState}
         onPerformCommand={performManualCommand}
         pendingAction={pendingAction}
+        saltPct={saltPct}
+        brinePct={brinePct}
       />
     </ScrollView>
   );
@@ -1954,6 +2008,35 @@ const styles = StyleSheet.create({
   secondaryButton: {
     alignSelf: "flex-start",
     minWidth: 112,
+  },
+  manualControlRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 6,
+  },
+  manualControlButton: {
+    minWidth: 180,
+  },
+  manualGatewayStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  manualGatewayDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  manualGatewayDotConnected: {
+    backgroundColor: "#1a9a5b",
+  },
+  manualGatewayDotDisconnected: {
+    backgroundColor: "#b63d3d",
+  },
+  manualGatewayText: {
+    fontSize: 12,
+    fontWeight: "600",
   },
   metric: {
     fontSize: 15,

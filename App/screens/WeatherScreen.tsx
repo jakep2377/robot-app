@@ -125,40 +125,40 @@ const TABLE_RULES: Record<Exclude<TableEvent, "none">, { label: string; bands: T
   lightSnow: {
     label: "Light Snow Storm",
     bands: [
-      { minTempF: 20, maxTempF: 32, saltPctFull: 63.79, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
-      { minTempF: 15, maxTempF: 20, saltPctFull: 125.30, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
+      { minTempF: 20, maxTempF: 32, saltPctFull: 40.72, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 79.98, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
     ],
   },
   moderateHeavySnow: {
     label: "Moderate or Heavy Snow Storm",
     bands: [
-      { minTempF: 30, maxTempF: 32, saltPctFull: 63.79, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
-      { minTempF: 25, maxTempF: 30, saltPctFull: 110.49, brinePctFull: 117.28, saltGpm: 397.8, brineLpm: 1.642 },
-      { minTempF: 15, maxTempF: 25, saltPctFull: 125.30, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
+      { minTempF: 30, maxTempF: 32, saltPctFull: 40.72, brinePctFull: 59.70, saltGpm: 229.6, brineLpm: 0.836 },
+      { minTempF: 25, maxTempF: 30, saltPctFull: 70.52, brinePctFull: 117.28, saltGpm: 397.8, brineLpm: 1.642 },
+      { minTempF: 15, maxTempF: 25, saltPctFull: 79.98, brinePctFull: 0.00, saltGpm: 451.1, brineLpm: 0.000 },
     ],
   },
   frostBlackIce: {
     label: "Frost or Black Ice",
     bands: [
-      { minTempF: 28, maxTempF: 35, saltPctFull: 28.48, brinePctFull: 0.00, saltGpm: 102.5, brineLpm: 0.000 },
-      { minTempF: 20, maxTempF: 28, saltPctFull: 72.90, brinePctFull: 68.23, saltGpm: 262.4, brineLpm: 0.955 },
-      { minTempF: 15, maxTempF: 20, saltPctFull: 92.26, brinePctFull: 0.00, saltGpm: 332.1, brineLpm: 0.000 },
+      { minTempF: 28, maxTempF: 35, saltPctFull: 18.18, brinePctFull: 0.00, saltGpm: 102.5, brineLpm: 0.000 },
+      { minTempF: 20, maxTempF: 28, saltPctFull: 46.53, brinePctFull: 68.23, saltGpm: 262.4, brineLpm: 0.955 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 58.89, brinePctFull: 0.00, saltGpm: 332.1, brineLpm: 0.000 },
     ],
   },
   freezingRain: {
     label: "Freezing Rain Storm",
     bands: [
-      { minTempF: 32, maxTempF: 200, saltPctFull: 55.81, brinePctFull: 0.00, saltGpm: 200.9, brineLpm: 0.000 },
-      { minTempF: 20, maxTempF: 32, saltPctFull: 103.65, brinePctFull: 0.00, saltGpm: 373.2, brineLpm: 0.000 },
-      { minTempF: 15, maxTempF: 20, saltPctFull: 205.03, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
+      { minTempF: 32, maxTempF: 200, saltPctFull: 35.63, brinePctFull: 0.00, saltGpm: 200.9, brineLpm: 0.000 },
+      { minTempF: 20, maxTempF: 32, saltPctFull: 66.16, brinePctFull: 0.00, saltGpm: 373.2, brineLpm: 0.000 },
+      { minTempF: 15, maxTempF: 20, saltPctFull: 130.87, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
     ],
   },
   sleet: {
     label: "Sleet Storm",
     bands: [
-      { minTempF: 32, maxTempF: 200, saltPctFull: 79.73, brinePctFull: 0.00, saltGpm: 287.0, brineLpm: 0.000 },
-      { minTempF: 28, maxTempF: 32, saltPctFull: 142.38, brinePctFull: 0.00, saltGpm: 512.6, brineLpm: 0.000 },
-      { minTempF: 15, maxTempF: 28, saltPctFull: 205.03, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
+      { minTempF: 32, maxTempF: 200, saltPctFull: 50.89, brinePctFull: 0.00, saltGpm: 287.0, brineLpm: 0.000 },
+      { minTempF: 28, maxTempF: 32, saltPctFull: 90.88, brinePctFull: 0.00, saltGpm: 512.6, brineLpm: 0.000 },
+      { minTempF: 15, maxTempF: 28, saltPctFull: 130.87, brinePctFull: 0.00, saltGpm: 738.1, brineLpm: 0.000 },
     ],
   },
 };
