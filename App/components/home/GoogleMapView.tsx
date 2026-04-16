@@ -163,7 +163,7 @@ const MAP_THEME = {
 };
 const MAX_ROBOT_TRAIL_POINTS = 240;
 const MAX_ROBOT_JUMP_METERS = 35;
-const MIN_ROBOT_POINT_SEPARATION_M = 0.25;
+const MIN_ROBOT_POINT_SEPARATION_M = 1.5;
 
 function normalizeHeadingDeg(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;

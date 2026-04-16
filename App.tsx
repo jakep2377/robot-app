@@ -49,6 +49,9 @@ const LOCAL_SERVER_CANDIDATES = [
   'http://localhost:8080',
   'http://127.0.0.1:8080',
 ];
+const LOCAL_DISCOVERY_TIMEOUT_MS = 2200;
+const CLOUD_DISCOVERY_TIMEOUT_MS = 8000;
+const DISCOVERY_RETRY_INTERVAL_MS = 6000;
 
 type ConnectionMode = 'discovering' | 'local' | 'cloud' | 'manual';
 
@@ -72,9 +75,12 @@ async function pickFirstHealthy(urls: string[], timeoutMs: number) {
 
 async function discoverBestServer() {
   const localCandidates = uniqueUrls(LOCAL_SERVER_CANDIDATES);
-  const { success: localSuccess, results: localResults } = localCandidates.length
-    ? await pickFirstHealthy(localCandidates, 1400)
-    : { success: null, results: [] as ServerProbeResult[] };
+  const localProbePromise = localCandidates.length
+    ? pickFirstHealthy(localCandidates, LOCAL_DISCOVERY_TIMEOUT_MS)
+    : Promise.resolve({ success: null, results: [] as ServerProbeResult[] });
+  const cloudProbePromise = probeServer(DEFAULT_CLOUD_SERVER_URL, CLOUD_DISCOVERY_TIMEOUT_MS);
+
+  const { success: localSuccess, results: localResults } = await localProbePromise;
 
   if (localSuccess) {
     return {
@@ -89,7 +95,7 @@ async function discoverBestServer() {
     };
   }
 
-  const cloud = await probeServer(DEFAULT_CLOUD_SERVER_URL, 2600);
+  const cloud = await cloudProbePromise;
   if (cloud.ok) {
     return {
       state: {
@@ -103,13 +109,17 @@ async function discoverBestServer() {
     };
   }
 
+  const cloudTimedOut = /timed out|timeout|socket|abort/i.test(String(cloud.error ?? ''));
+
   return {
     state: {
       serverUrl: DEFAULT_CLOUD_SERVER_URL,
       mode: 'cloud' as const,
-      label: 'Server offline',
-      status: 'error' as const,
-      detail: 'No reachable local or remote server was found.',
+      label: cloudTimedOut ? 'Waking remote server' : 'Server offline',
+      status: cloudTimedOut ? 'connecting' as const : 'error' as const,
+      detail: cloudTimedOut
+        ? 'The hosted server is waking up. The app will keep retrying in the background.'
+        : 'No reachable local or remote server was found.',
     },
     probes: [...localResults, cloud],
   };
@@ -152,6 +162,8 @@ export default function App() {
       if (result.state.status === 'error') {
         const failedProbe = result.probes.find((probe) => !probe.ok);
         setConnectionError(failedProbe?.error ?? 'Unable to reach a local or hosted server.');
+      } else {
+        setConnectionError(null);
       }
     } finally {
       setConnectionBusy(false);
@@ -164,6 +176,20 @@ export default function App() {
       setConnectionError('Unable to check the server connection.');
     });
   }, []);
+
+  useEffect(() => {
+    if (!['connecting', 'error'].includes(connection.status) || connectionBusy) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      runDiscovery().catch(() => {
+        setConnectionBusy(false);
+      });
+    }, DISCOVERY_RETRY_INTERVAL_MS);
+
+    return () => clearTimeout(timer);
+  }, [connection.status, connectionBusy]);
 
   useEffect(() => {
     setBaseStationBackendUrl(serverUrl);

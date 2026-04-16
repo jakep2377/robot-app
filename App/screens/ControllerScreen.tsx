@@ -497,7 +497,7 @@ export default function ControllerScreen({
 
   const resolvedManualServerUrl = ((status?.manual_command_url && status.manual_command_url.trim()) || (manualServerUrl && manualServerUrl.trim()) || "");
   const serverReachable = connectionStatus === "connected" || connectionStatus === "fallback";
-  const directGatewayPreferred = Boolean(resolvedManualServerUrl) && summary?.demo?.enabled === true;
+  const directGatewayPreferred = Boolean(resolvedManualServerUrl) && summary?.demo?.enabled === true && manualGatewayConnected === true;
 
   const delayMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -523,7 +523,7 @@ export default function ControllerScreen({
 
   const verifyManualGateway = async () => {
     if (!resolvedManualServerUrl) return false;
-    const result = await getGatewayJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status");
+    const result = await getGatewayJsonAllowError<{ ok?: boolean; manualReady?: boolean; wifiConnected?: boolean }>(resolvedManualServerUrl, "/status", 1500);
     return Boolean(result.ok && result.data && (result.data.ok !== false));
   };
 
@@ -637,7 +637,11 @@ export default function ControllerScreen({
       }
 
       try {
-        await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL");
+        if (manualGatewayConnected) {
+          await postGatewayText(resolvedManualServerUrl, "/command", "MANUAL", 3000);
+        } else {
+          await postText(serverUrl, "/command", "MANUAL", 4000);
+        }
         setManualControlVisible(true);
         setError(null);
       } catch (requestError) {
@@ -653,8 +657,13 @@ export default function ControllerScreen({
   const closeManualControl = async () => {
     setManualControlVisible(false);
     try {
-      await postGatewayText(resolvedManualServerUrl, "/command", "STOP");
-      await postGatewayText(resolvedManualServerUrl, "/command", "PAUSE");
+      if (manualGatewayConnected) {
+        await postGatewayText(resolvedManualServerUrl, "/command", "STOP", 3000);
+        await postGatewayText(resolvedManualServerUrl, "/command", "PAUSE", 3000);
+      } else {
+        await postText(serverUrl, "/command", "STOP", 4000);
+        await postText(serverUrl, "/command", "PAUSE", 4000);
+      }
     } catch {
       // Ignore errors on close
     }
@@ -663,7 +672,11 @@ export default function ControllerScreen({
   const performManualCommand = async (command: string) => {
     setPendingAction(`manual-${command}`);
     try {
-      await postGatewayText(resolvedManualServerUrl, "/command", command.toUpperCase());
+      if (manualGatewayConnected) {
+        await postGatewayText(resolvedManualServerUrl, "/command", command.toUpperCase(), 3000);
+      } else {
+        await postText(serverUrl, "/command", command.toUpperCase(), 4000);
+      }
       setError(null);
       return true;
     } catch (requestError) {
@@ -978,6 +991,7 @@ export default function ControllerScreen({
       await postJson(serverUrl, '/api/demo-mode/spot', {
         kind,
         source: 'app.controller',
+        allowWeakGps: true,
       });
       setDemoPathPoints([]);
       setTestResult(`${kind === 'start' ? 'Spot A' : 'Spot B'} updated. Build Demo Path again to refresh the route.`);
@@ -1304,11 +1318,12 @@ export default function ControllerScreen({
     : 'No telemetry yet';
   const gpsReady = Boolean(connection?.robot?.gpsReady);
   const demoModeEnabled = Boolean(summary?.demo?.enabled);
-  const waypointsCommitted = summary?.lora?.wpPushState === "committed";
-  const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
   const demoSpots = summary?.demo?.spots ?? null;
   const demoSpotGpsStatus = summary?.demo?.spotGpsStatus ?? null;
   const demoReadiness = summary?.demo?.readiness ?? null;
+  const effectiveWaypointState = demoReadiness?.wpPushState ?? summary?.lora?.wpPushState ?? "none";
+  const waypointsCommitted = effectiveWaypointState === "committed" || effectiveWaypointState === "remote-queued";
+  const missionStartReady = Boolean(allowedAction("mission-start")?.enabled);
   const demoDiagnostics = summary?.demo?.diagnostics ?? null;
   const demoObstacle = summary?.demo?.obstacle ?? null;
   const robotMotor = summary?.robot?.motor ?? null;
@@ -1330,7 +1345,7 @@ export default function ControllerScreen({
     { label: "Gateway", value: gatewayLabel || formatConnectionStateLabel(gatewayState), detail: gatewayReason ?? "LoRa bridge", good: gatewayWorking },
     { label: "STM32", value: stm32StateLabel, detail: stm32LastSeenLabel, good: stm32Online },
     { label: "GPS", value: gpsReady ? "Ready" : "Needs attention", detail: gpsReady ? "Autonomy ready" : "Wait for lock", good: gpsReady },
-    { label: "Waypoints", value: demoGatewayReady ? "Ready in app" : (waypointsCommitted ? "Committed" : "Not committed"), detail: directGatewayPreferred ? "Phone to gateway HTTP" : commandPathStateLabel, good: demoGatewayReady || waypointsCommitted },
+    { label: "Waypoints", value: demoGatewayReady ? "Ready in app" : (waypointsCommitted ? (effectiveWaypointState === "remote-queued" ? "Syncing" : "Committed") : "Not committed"), detail: directGatewayPreferred ? "Phone to gateway HTTP" : commandPathStateLabel, good: demoGatewayReady || waypointsCommitted },
   ];
   const attentionItems = systemCheckItems
     .filter((item) => item.good === false)

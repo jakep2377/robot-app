@@ -137,6 +137,9 @@ function looksLikeRobotBackend(payload: unknown) {
 export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<ServerProbeResult> {
   const normalized = normalizeServerUrl(serverUrl);
   const startedAt = Date.now();
+  let lastStatus: number | null = null;
+  let lastPayload: unknown = null;
+  let lastError = '';
 
   try {
     const healthResponse = await fetchWithTimeout(`${normalized}/api/health`, {
@@ -145,9 +148,13 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
       },
     }, timeoutMs);
     const healthText = await readBody(healthResponse);
+    const healthPayload = parseBodyPayload(healthText);
     const latencyMs = Date.now() - startedAt;
 
-    const healthPayload = parseBodyPayload(healthText);
+    lastStatus = healthResponse.status;
+    lastPayload = healthPayload;
+    lastError = healthText || `HTTP ${healthResponse.status}`;
+
     if (healthResponse.ok && looksLikeRobotBackend(healthPayload)) {
       return {
         ok: true,
@@ -157,20 +164,27 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
         payload: healthPayload,
       };
     }
+  } catch (error) {
+    lastError = error instanceof Error ? error.message : 'Health probe failed';
+  }
 
+  try {
     const statusResponse = await fetchWithTimeout(`${normalized}/status`, {
       headers: {
         ...buildAuthHeaders(),
       },
-    }, timeoutMs);
+    }, Math.max(timeoutMs, 2500));
     const statusText = await readBody(statusResponse);
+    const latencyMs = Date.now() - startedAt;
+
+    lastStatus = statusResponse.status;
     if (!statusResponse.ok) {
       return {
         ok: false,
         serverUrl: normalized,
         status: statusResponse.status,
         latencyMs,
-        error: statusText || `HTTP ${statusResponse.status}`,
+        error: statusText || lastError || `HTTP ${statusResponse.status}`,
       };
     }
 
@@ -181,7 +195,7 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
         serverUrl: normalized,
         status: statusResponse.status,
         latencyMs,
-        error: "Endpoint is reachable, but it is not the robot backend.",
+        error: 'Endpoint is reachable, but it is not the robot backend.',
         payload,
       };
     }
@@ -197,9 +211,10 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
     return {
       ok: false,
       serverUrl: normalized,
-      status: null,
+      status: lastStatus,
       latencyMs: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : "Probe failed",
+      error: error instanceof Error ? error.message : lastError || 'Probe failed',
+      payload: lastPayload,
     };
   }
 }
