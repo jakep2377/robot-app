@@ -1,3 +1,10 @@
+/**
+ * treatmentRules.ts
+ *
+ * Converts forecast conditions into app-facing salt/brine percentage targets.
+ * The goal is not to model the full physics of anti-icing, but to translate
+ * workbook-style rate guidance into the percentage controls this app exposes.
+ */
 export type Mix = { saltPct: number; brinePct: number; reason: string };
 
 type FrostRisk = { level: "low" | "moderate" | "high"; text: string };
@@ -28,6 +35,8 @@ function pickFromRange(min: number, max: number, severity: number) {
 }
 
 function snowSeverity(precipInches: number, windSpeed: number, windGust: number) {
+  // Use a coarse severity score so workbook bands can scale up within a single
+  // event type without introducing another large lookup table.
   const precipFactor = Math.max(0, Math.min(1, precipInches / 0.1));
   const windFactor = Math.max(0, Math.min(1, Math.max(windSpeed - 8, windGust - 12) / 20));
   return Math.max(precipFactor, windFactor * 0.7);
@@ -54,6 +63,8 @@ function combined(rateKgLkm: number, liquidRateGalLm: number, reason: string): M
 }
 
 export function frostRisk(tempF: number, humidity: number): FrostRisk {
+  // Dew-point spread is a practical proxy here: small spread near freezing
+  // implies a higher chance of condensation/refreeze on pavement.
   const tempC = (tempF - 32) * (5 / 9);
   const dewPointC = (237.7 * (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100))) / (17.27 - (((17.27 * tempC) / (237.7 + tempC)) + Math.log(humidity / 100)));
   const dewPointF = (dewPointC * 9) / 5 + 32;

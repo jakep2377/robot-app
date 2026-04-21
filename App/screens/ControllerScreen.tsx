@@ -16,6 +16,10 @@ import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
 import { JoystickControl, JoystickState } from "../components/common/Joystick";
 
+// ControllerScreen is the operator cockpit for direct control, supervision,
+// and demo-mode workflows. It pulls together manual commands, readiness state,
+// transport history, and bench-test actions in one intentionally dense screen.
+
 type AllowedAction = {
   id: string;
   enabled: boolean;
@@ -319,6 +323,9 @@ type TestMenuRunResponse = {
   result?: Record<string, unknown>;
 };
 
+// The large group of response/type definitions above mirrors backend payloads
+// closely so UI code can stay defensive around partially-populated status data.
+
 type TestMenuResponse = {
   ok: boolean;
   tests: TestMenuAction[];
@@ -353,6 +360,26 @@ const MISSION_ENDPOINTS: Record<string, string> = {
   "mission-complete": "/api/mission/complete",
   "push-waypoints": "/api/lora/push-waypoints",
 };
+
+const FALLBACK_TEST_MENU: TestMenuAction[] = [
+  { id: "mode-manual", title: "Mode Manual", description: "Put the robot into MANUAL.", caution: "safe", group: "Modes" },
+  { id: "mode-auto", title: "Mode Auto", description: "Send AUTO to the robot.", caution: "caution", group: "Modes" },
+  { id: "ack-pause", title: "Pause ACK", description: "Send PAUSE and verify response.", caution: "safe", group: "Modes" },
+  { id: "ack-reset", title: "Reset ACK", description: "Send RESET and verify recovery.", caution: "caution", group: "Modes" },
+  { id: "drive-forward", title: "Drive Forward", description: "Send a single forward drive command.", caution: "danger", group: "Drive" },
+  { id: "drive-left", title: "Drive Left", description: "Send a single left steer command.", caution: "danger", group: "Drive" },
+  { id: "drive-stop", title: "Drive Stop", description: "Send STOP to halt motion.", caution: "safe", group: "Drive" },
+  { id: "drive-right", title: "Drive Right", description: "Send a single right steer command.", caution: "danger", group: "Drive" },
+  { id: "drive-backward", title: "Drive Back", description: "Send a single reverse drive command.", caution: "danger", group: "Drive" },
+  { id: "salt-50", title: "Salt 50%", description: "Bench-test salt output.", caution: "caution", group: "Dispersion" },
+  { id: "brine-50", title: "Brine 50%", description: "Bench-test brine output.", caution: "caution", group: "Dispersion" },
+  { id: "agitator-on", title: "Agitator ON", description: "Toggle the agitator for testing.", caution: "caution", group: "Dispersion" },
+  { id: "thrower-on", title: "Thrower ON", description: "Toggle the thrower for testing.", caution: "caution", group: "Dispersion" },
+  { id: "relay-on", title: "Relay ON", description: "Toggle the relay for testing.", caution: "caution", group: "Dispersion" },
+  { id: "vibration-on", title: "Vibration ON", description: "Toggle the vibration motor for testing.", caution: "caution", group: "Dispersion" },
+  { id: "safe-off", title: "Safe Outputs Off", description: "Stop all outputs safely.", caution: "safe", group: "Dispersion" },
+  { id: "raw-command", title: "Raw Command", description: "Send a custom plain-text command.", caution: "danger", group: "Advanced", needsInput: { field: "cmdText", label: "Command", placeholder: "CMD:AUTO,SALT:25,BRINE:75" } },
+];
 
 function formatReadableValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -478,7 +505,7 @@ export default function ControllerScreen({
   const [manualControlVisible, setManualControlVisible] = useState(false);
   const [manualGatewayConnected, setManualGatewayConnected] = useState(false);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
-  const [serviceToolsVisible, setServiceToolsVisible] = useState(false);
+  const [serviceToolsVisible, setServiceToolsVisible] = useState(true);
   const [preflightVisible, setPreflightVisible] = useState(false);
   const [demoLaneWidthInput, setDemoLaneWidthInput] = useState("3.0");
   const [demoGeofenceToleranceInput, setDemoGeofenceToleranceInput] = useState("6.0");
@@ -725,8 +752,10 @@ export default function ControllerScreen({
         setHealth(healthResult.data);
       }
       if (testMenuResult?.ok && testMenuResult.data?.ok) {
-        setTestMenu(Array.isArray(testMenuResult.data.tests) ? testMenuResult.data.tests : []);
+        setTestMenu(Array.isArray(testMenuResult.data.tests) ? testMenuResult.data.tests : FALLBACK_TEST_MENU);
         setCommandHistory(Array.isArray(testMenuResult.data.commandHistory) ? testMenuResult.data.commandHistory : []);
+      } else {
+        setTestMenu((current) => (current.length ? current : FALLBACK_TEST_MENU));
       }
 
       const anySuccess = Boolean(

@@ -1,3 +1,10 @@
+/**
+ * GoogleMapView.tsx
+ *
+ * Interactive planning surface for the operator. This component combines map
+ * drafting, route visualization, live telemetry overlays, and demo-path state
+ * because those experiences all need the same synchronized map state.
+ */
 import React, { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -6,6 +13,7 @@ import Svg, { Circle, Defs, LinearGradient, Path as SvgPath, Stop } from 'react-
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { getGatewayJsonAllowError, getJson, postJson, toWebSocketUrl } from '../../lib/serverApi';
+import type { DemoPathPoint, LatLonPayload, PlannerPublicState, PlannerStateResponse } from '../../lib/plannerTypes';
 import AppButton from '../common/AppButton';
 import AppNoticeModal from '../common/AppNoticeModal';
 
@@ -13,12 +21,6 @@ type RectangleSelection = {
   baseStation: LatLng;
   goal: LatLng;
   boundary: LatLng[];
-};
-
-type PlannedPoint = {
-  lat: number;
-  lon: number;
-  headingDeg?: number | null;
 };
 
 type PlannedCoordinate = {
@@ -53,28 +55,6 @@ type CoverageResponse = {
   };
 };
 
-type LatLonPayload = {
-  lat?: number | null;
-  lon?: number | null;
-  latitude?: number | null;
-  longitude?: number | null;
-  headingDeg?: number | null;
-  heading?: number | null;
-  yaw?: number | null;
-  state?: string | null;
-  timestampMs?: number | null;
-  gpsSat?: number | null;
-  gpsHdop?: number | null;
-  sat?: number | null;
-  hdop?: number | null;
-  prox?: {
-    left?: number | null;
-    right?: number | null;
-  } | null;
-  pl?: number | null;
-  pr?: number | null;
-};
-
 type RobotLiveTelemetry = {
   headingDeg: number | null;
   gpsSat: number | null;
@@ -94,22 +74,6 @@ type GatewayStatusResponse = {
   robotTelemetry?: LatLonPayload | null;
 };
 
-type PlannerPublicState = {
-  baseStation?: LatLonPayload | null;
-  remoteBaseStation?: LatLonPayload | null;
-  homePoint?: LatLonPayload | null;
-  boundary?: LatLonPayload[] | null;
-  robot?: LatLonPayload | null;
-  trail?: LatLonPayload[] | null;
-  lastPath?: PlannedPoint[] | null;
-  lastArrows?: PlannedPoint[] | null;
-};
-
-type PlannerStateResponse = {
-  ok: boolean;
-  state?: PlannerPublicState | null;
-};
-
 type PlannerSocketMessage = {
   event?: string;
   payload?: {
@@ -119,8 +83,8 @@ type PlannerSocketMessage = {
     boundary?: LatLonPayload[] | null;
     robot?: LatLonPayload | null;
     trail?: LatLonPayload[] | null;
-    points?: PlannedPoint[] | null;
-    arrows?: PlannedPoint[] | null;
+    points?: DemoPathPoint[] | null;
+    arrows?: DemoPathPoint[] | null;
   } | null;
   at?: number;
 };
@@ -129,7 +93,7 @@ type Props = {
   serverUrl: string;
   saltPct: number;
   brinePct: number;
-  demoPathPoints?: unknown[];
+  demoPathPoints?: DemoPathPoint[];
 };
 
 type PlanningCacheState = {
@@ -202,6 +166,7 @@ function toLatLngPoint(point: unknown): LatLng | null {
   const longitude = Number(candidate.lon ?? candidate.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
   if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  // Ignore zero-ish placeholder coordinates that appear before the robot has a fix.
   if (Math.abs(latitude) < 0.0001 && Math.abs(longitude) < 0.0001) return null;
   return { latitude, longitude };
 }
@@ -219,7 +184,7 @@ function toPlannedCoordinates(points: unknown): PlannedCoordinate[] {
     coordinates.push({
       latitude: coordinate.latitude,
       longitude: coordinate.longitude,
-      headingDeg: normalizeHeadingDeg((point as PlannedPoint)?.headingDeg ?? null),
+      headingDeg: normalizeHeadingDeg((point as DemoPathPoint)?.headingDeg ?? null),
     });
     return coordinates;
   }, []);
@@ -240,6 +205,8 @@ let planningCache: PlanningCacheState = {
   robotPoint: null,
   robotTrail: [],
 };
+// Cache map-planning state at module scope so switching tabs does not discard an
+// operator's in-progress draft before it has been saved to the backend.
 
 function CornerPin({ tone }: { tone: 'start' | 'goal' | 'edge' }) {
   const palette = tone === 'start'
@@ -360,6 +327,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
       centerOnCoordinate(coordinates[0]);
       return;
     }
+    // Let the native map SDK handle viewport fitting across device sizes.
     requestAnimationFrame(() => {
       mapRef.current?.fitToCoordinates(coordinates, {
         edgePadding: padding,
@@ -1187,10 +1155,10 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
         if (!saved) return;
       }
 
-      let result: { ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null };
+      let result: { ok: boolean; points: DemoPathPoint[]; arrows?: DemoPathPoint[]; mode?: string | null };
       let routeModeLabel = 'coverage route';
       try {
-        result = await postJson<{ ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+        result = await postJson<{ ok: boolean; points: DemoPathPoint[]; arrows?: DemoPathPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
           mode: 'coverage',
           sweepDirection: 'leftToRight',
           start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
@@ -1214,7 +1182,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
           throw coverageError;
         }
 
-        result = await postJson<{ ok: boolean; points: PlannedPoint[]; arrows?: PlannedPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
+        result = await postJson<{ ok: boolean; points: DemoPathPoint[]; arrows?: DemoPathPoint[]; mode?: string | null }>(serverUrl, '/api/path/plan', {
           mode: 'goal',
           start: { lat: resolvedBaseStation.latitude, lon: resolvedBaseStation.longitude },
           goal: { lat: normalizedGoal.latitude, lon: normalizedGoal.longitude },

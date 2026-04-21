@@ -10,6 +10,10 @@ import {
 } from "react-native";
 import { postGatewayPlainText, postGatewayText } from "../../lib/serverApi";
 
+// Manual-drive control surface for the gateway path. This file turns touch
+// gestures into repeated drive vectors and quick directional commands while
+// trying to stay robust on mobile networks.
+
 export type JoystickState = {
   x: number;
   y: number;
@@ -58,6 +62,7 @@ function computeJoystickValues(locationX: number, locationY: number) {
   const rawTurn = normalizeToPercent((x / JOYSTICK_TRAVEL_RADIUS) * JOYSTICK_MAX_OUTPUT_PERCENT);
   const rawDrive = normalizeToPercent((-y / JOYSTICK_TRAVEL_RADIUS) * JOYSTICK_MAX_OUTPUT_PERCENT);
 
+  // Small thumb jitter around center should still count as neutral.
   const turn = Math.abs(rawTurn) <= JOYSTICK_DEAD_ZONE * 100 ? 0 : rawTurn;
   const drive = Math.abs(rawDrive) <= JOYSTICK_DEAD_ZONE * 100 ? 0 : rawDrive;
 
@@ -106,6 +111,7 @@ async function sendDriveCommand(
 
   const now = Date.now();
   const isStop = (drive === 0 && turn === 0);
+  // Motion vectors are rate-limited, but stop is allowed through immediately.
   if (!isStop && (now - lastSentAtRef.current) < JOYSTICK_SEND_MIN_INTERVAL_MS) {
     return;
   }
@@ -200,12 +206,15 @@ export function JoystickControl({
       if (!joystickActiveRef.current) return;
       const { drive, turn } = joystickCurrentRef.current;
       if (drive === 0 && turn === 0) return;
+      // Re-send while held so the gateway keeps receiving fresh motion intents.
       void sendDriveCommand(resolvedManualUrl, drive, turn, driveSequenceRef, lastJoystickSent, lastJoystickSentAt, setManualTransportMode, { force: true });
     }, JOYSTICK_HOLD_REPEAT_MS);
   };
 
   const sendStopBurst = async () => {
     if (!gatewayManualReady) return;
+    // Stop is sent as a short burst because release reliability matters more
+    // than command economy when the operator lifts their thumb.
     for (let i = 0; i < STOP_BURST_COUNT; i += 1) {
       try {
         const transport = await postManualCommand(resolvedManualUrl, "STOP");

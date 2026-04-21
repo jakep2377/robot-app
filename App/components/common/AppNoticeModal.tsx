@@ -4,6 +4,9 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 
 import AppButton from "./AppButton";
 
+// Reusable confirmation/alert modal with a small opinionated tone system so
+// destructive, warning, and success states all read consistently in the app.
+
 type Variant = "primary" | "secondary" | "outline" | "danger" | "success";
 type Tone = "info" | "success" | "warning" | "danger";
 

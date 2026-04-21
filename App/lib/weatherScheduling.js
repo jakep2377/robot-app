@@ -1,3 +1,5 @@
+// Small UTC-shift helpers for presenting forecast timestamps in the forecast
+// city's local time without depending on a larger timezone library.
 function getShiftedDate(unixSeconds, timezoneSeconds = 0) {
   return new Date((unixSeconds + timezoneSeconds) * 1000);
 }

@@ -8,6 +8,9 @@ import {
   View,
 } from "react-native";
 
+// Percent slider used for treatment controls. It supports both step buttons and
+// drag gestures so operators can make coarse or fine changes quickly.
+
 type Props = {
   label: string;
   value: number;

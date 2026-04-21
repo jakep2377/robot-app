@@ -1,3 +1,10 @@
+/**
+ * serverApi.ts
+ *
+ * Small network layer for both the planner backend and the direct gateway.
+ * The helpers here normalize URLs, attach auth headers, and keep timeout/error
+ * behavior consistent across screens.
+ */
 function appendLocalBackendDefaultPort(url: string) {
   const match = url.match(/^(https?):\/\/([^/]+)(\/.*)?$/i);
   if (!match) {
@@ -29,6 +36,7 @@ export function normalizeServerUrl(rawUrl: string) {
   }
 
   const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  // Local hosts commonly omit the backend port in the UI, so fill it in here.
   return appendLocalBackendDefaultPort(withProtocol).replace(/\/+$/, "");
 }
 
@@ -54,6 +62,14 @@ export function normalizeGatewayUrl(rawUrl: string) {
 
 export function toWebSocketUrl(serverUrl: string) {
   return normalizeServerUrl(serverUrl).replace(/^http/i, "ws");
+}
+
+function buildServerRequestUrl(serverUrl: string, path: string) {
+  return `${normalizeServerUrl(serverUrl)}${path}`;
+}
+
+function buildGatewayRequestUrl(gatewayUrl: string, path: string) {
+  return `${normalizeGatewayUrl(gatewayUrl)}${path}`;
 }
 
 export type ServerProbeResult = {
@@ -97,6 +113,8 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
       signal: controller.signal,
     });
   } catch (error) {
+    // Normalize platform/network-specific timeout wording into one message the
+    // UI can display without having to understand fetch implementation details.
     const message = error instanceof Error ? error.message : String(error ?? 'Network request failed');
     const normalized = message.toLowerCase();
     if (
@@ -142,6 +160,7 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
   let lastError = '';
 
   try {
+    // Health is the fastest and most stable probe path when the backend is up.
     const healthResponse = await fetchWithTimeout(`${normalized}/api/health`, {
       headers: {
         ...buildAuthHeaders(),
@@ -169,6 +188,8 @@ export async function probeServer(serverUrl: string, timeoutMs = 1500): Promise<
   }
 
   try {
+    // Fall back to /status so older deployments or direct endpoints still get
+    // a meaningful probe attempt before the app reports failure.
     const statusResponse = await fetchWithTimeout(`${normalized}/status`, {
       headers: {
         ...buildAuthHeaders(),
@@ -308,8 +329,17 @@ async function readBody(response: Response) {
   return text.trim();
 }
 
+function parseJsonOrNull<T>(text: string): T | null {
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
 export async function getJson<T>(serverUrl: string, path: string, timeoutMs = 8000): Promise<T> {
-  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildServerRequestUrl(serverUrl, path), {
     headers: {
       ...buildAuthHeaders(),
     },
@@ -318,61 +348,43 @@ export async function getJson<T>(serverUrl: string, path: string, timeoutMs = 80
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
   }
-  return text ? (JSON.parse(text) as T) : ({} as T);
+  return parseJsonOrNull<T>(text) ?? ({} as T);
 }
 
 export async function getJsonAllowError<T>(serverUrl: string, path: string, timeoutMs = 8000): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
-  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildServerRequestUrl(serverUrl, path), {
     headers: {
       ...buildAuthHeaders(),
     },
   }, timeoutMs);
 
   const text = await readBody(response);
-  let data: T | null = null;
-  if (text) {
-    try {
-      data = JSON.parse(text) as T;
-    } catch {
-      data = null;
-    }
-  }
-
   return {
     ok: response.ok,
     status: response.status,
-    data,
+    data: parseJsonOrNull<T>(text),
     raw: text,
   };
 }
 
 export async function getGatewayJsonAllowError<T>(gatewayUrl: string, path: string, timeoutMs = 8000): Promise<{ ok: boolean; status: number; data: T | null; raw: string }> {
-  const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildGatewayRequestUrl(gatewayUrl, path), {
     headers: {
       ...buildAuthHeaders(),
     },
   }, timeoutMs);
 
   const text = await readBody(response);
-  let data: T | null = null;
-  if (text) {
-    try {
-      data = JSON.parse(text) as T;
-    } catch {
-      data = null;
-    }
-  }
-
   return {
     ok: response.ok,
     status: response.status,
-    data,
+    data: parseJsonOrNull<T>(text),
     raw: text,
   };
 }
 
 export async function postJson<T>(serverUrl: string, path: string, body: unknown, timeoutMs = 15000): Promise<T> {
-  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildServerRequestUrl(serverUrl, path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -384,11 +396,11 @@ export async function postJson<T>(serverUrl: string, path: string, body: unknown
   if (!response.ok) {
     throw new Error(text || `HTTP ${response.status}`);
   }
-  return text ? (JSON.parse(text) as T) : ({} as T);
+  return parseJsonOrNull<T>(text) ?? ({} as T);
 }
 
 export async function postText(serverUrl: string, path: string, body: string, timeoutMs = 10000) {
-  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildServerRequestUrl(serverUrl, path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -404,7 +416,7 @@ export async function postText(serverUrl: string, path: string, body: string, ti
 }
 
 export async function postGatewayText(gatewayUrl: string, path: string, body: string, timeoutMs = 10000) {
-  const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildGatewayRequestUrl(gatewayUrl, path), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -420,7 +432,7 @@ export async function postGatewayText(gatewayUrl: string, path: string, body: st
 }
 
 export async function postGatewayPlainText(gatewayUrl: string, path: string, body: string, timeoutMs = 8000) {
-  const response = await fetchWithTimeout(`${normalizeGatewayUrl(gatewayUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildGatewayRequestUrl(gatewayUrl, path), {
     method: "POST",
     headers: {
       "Content-Type": "text/plain",
@@ -436,7 +448,7 @@ export async function postGatewayPlainText(gatewayUrl: string, path: string, bod
 }
 
 export async function postPlainText(serverUrl: string, path: string, body: string, timeoutMs = 8000) {
-  const response = await fetchWithTimeout(`${normalizeServerUrl(serverUrl)}${path}`, {
+  const response = await fetchWithTimeout(buildServerRequestUrl(serverUrl, path), {
     method: "POST",
     headers: {
       "Content-Type": "text/plain",

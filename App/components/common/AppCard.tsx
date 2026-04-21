@@ -1,6 +1,9 @@
 import React from "react";
 import { StyleProp, StyleSheet, Text, TextStyle, View, ViewStyle } from "react-native";
 
+// Shared surface wrapper used across screens to keep cards visually consistent
+// while still allowing each caller to customize spacing and heading styles.
+
 type Props = {
   title?: string;
   children: React.ReactNode;

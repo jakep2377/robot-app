@@ -1,3 +1,10 @@
+/**
+ * App.tsx
+ *
+ * App shell for the Expo client. This file owns the top-level connection and
+ * setup workflow, then passes the resolved backend URL and shared treatment
+ * state down into the three main tabs.
+ */
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -21,6 +28,7 @@ import AreaMapScreen from './App/screens/AreaMapScreen';
 import WeatherScreen from './App/screens/WeatherScreen';
 import HelpPane from './App/components/common/HelpPane';
 import { configureBaseStationSetup, normalizeBaseStationUrl, normalizeServerUrl, probeBaseStationSetup, probeServer, type BaseStationSetupStatus, type ServerProbeResult } from './App/lib/serverApi';
+import type { DemoPathPoint } from './App/lib/plannerTypes';
 
 const Tab = createBottomTabNavigator();
 const DEFAULT_CLOUD_SERVER_URL = 'https://robot-lora-server.onrender.com';
@@ -74,6 +82,8 @@ async function pickFirstHealthy(urls: string[], timeoutMs: number) {
 }
 
 async function discoverBestServer() {
+  // Probe likely local targets first because they give the lowest latency for
+  // map updates and manual control, then fall back to the hosted backend.
   const localCandidates = uniqueUrls(LOCAL_SERVER_CANDIDATES);
   const localProbePromise = localCandidates.length
     ? pickFirstHealthy(localCandidates, LOCAL_DISCOVERY_TIMEOUT_MS)
@@ -149,9 +159,11 @@ export default function App() {
   const [baseStationSetupStatus, setBaseStationSetupStatus] = useState<BaseStationSetupStatus | null>(null);
   const [saltPct, setSaltPct] = useState(100);
   const [brinePct, setBrinePct] = useState(100);
-  const [demoPathPoints, setDemoPathPoints] = useState<Array<{ lat: number; lon: number; salt?: number; brine?: number }>>([]);
+  const [demoPathPoints, setDemoPathPoints] = useState<DemoPathPoint[]>([]);
 
   const runDiscovery = async () => {
+    // Centralize connection-state updates here so both startup and retry flows
+    // produce the same UI state transitions.
     setConnectionBusy(true);
     setConnectionError(null);
     try {
@@ -178,6 +190,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Retry when the hosted backend is still waking up or the previous probe
+    // failed, but avoid stacking timers while a probe is already running.
     if (!['connecting', 'error'].includes(connection.status) || connectionBusy) {
       return;
     }
@@ -221,6 +235,8 @@ export default function App() {
       return;
     }
 
+    // The setup AP always receives the cloud backend URL here so the base
+    // station rejoins normal mode with a predictable server target.
     setBaseStationSetupBusy(true);
     setBaseStationSetupError(null);
     setBaseStationSetupInfo(null);

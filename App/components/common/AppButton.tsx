@@ -1,3 +1,8 @@
+/**
+ * Shared button primitive used across screens.
+ * Variants keep the visual language consistent without each screen redoing its
+ * own pressed/disabled styling.
+ */
 import React from "react";
 import { Pressable, StyleProp, StyleSheet, Text, TextStyle, ViewStyle } from "react-native";
 

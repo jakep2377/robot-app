@@ -6,6 +6,9 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import AppButton from "./AppButton";
 import AppCard from "./AppCard";
 
+// Static in-app operator guide. The content is intentionally curated here so
+// the field workflow can be explained without relying on network content.
+
 type IconName = React.ComponentProps<typeof MaterialCommunityIcons>["name"];
 
 type HelpSection = {

@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+// These tests pin down the local-day math used by weather scheduling so app
+// reminders stay aligned with forecast labels across timezone offsets.
+
 const {
   formatForecastLabel,
   formatShiftedDayKey,

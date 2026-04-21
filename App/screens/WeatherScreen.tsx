@@ -1,3 +1,10 @@
+/**
+ * WeatherScreen.tsx
+ *
+ * Forecast-driven treatment planning screen. It blends live weather data,
+ * workbook-derived treatment rules, and scheduler controls into one operator
+ * workflow for deciding when and how to run anti-icing.
+ */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -6,6 +13,7 @@ import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
 import AppNoticeModal from "../components/common/AppNoticeModal";
 import { getJsonAllowError, postJson } from "../lib/serverApi";
+import type { LatLonPayload, PlannerStateResponse } from "../lib/plannerTypes";
 import {
   formatForecastLabel,
   formatShiftedDayKey,
@@ -38,22 +46,6 @@ type ForecastPayload = {
     snow?: Record<string, number>;
   }>;
   city?: { timezone?: number };
-};
-
-type LatLonPayload = {
-  lat?: number | null;
-  lon?: number | null;
-  latitude?: number | null;
-  longitude?: number | null;
-};
-
-type PlannerPublicState = {
-  boundary?: LatLonPayload[] | null;
-};
-
-type PlannerStateResponse = {
-  ok?: boolean;
-  state?: PlannerPublicState | null;
 };
 
 type Props = {
@@ -137,6 +129,8 @@ function computeBoundaryAreaM2(points: unknown) {
     areaAccumulator += (current.longitude * next.latitude) - (next.longitude * current.latitude);
   }
 
+  // Good enough for the app's planning ranges; we only need an operational area
+  // estimate for fill guidance, not survey-grade geospatial precision.
   return Math.abs(areaAccumulator) * 0.5 * 111_320 * 111_320 * Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
 }
 
@@ -244,6 +238,8 @@ function inferOpenWeatherEvent(
 ): TableEvent {
   const text = normalizeWeatherText(conditionText);
 
+  // The workbook rules expect coarse event classes, so we collapse OpenWeather's
+  // richer condition set into the categories that drive treatment selection.
   if (primaryWeatherId === 511 || /freezing rain/.test(text)) return "freezingRain";
 
   if (
