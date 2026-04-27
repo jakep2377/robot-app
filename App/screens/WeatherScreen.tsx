@@ -109,6 +109,15 @@ function toLatLonPoint(point: unknown) {
   return { latitude, longitude };
 }
 
+/**
+ * Computes the approximate area of a boundary polygon using the Shoelace
+ * formula in geographic coordinates, then converts degree² to m².
+ *
+ * The cosine correction at the midpoint latitude compensates for the fact that
+ * a degree of longitude covers fewer metres as latitude increases.  This gives
+ * a good enough estimate for planning-range areas (< ~1 km²) without requiring
+ * a full geodetic projection.
+ */
 function computeBoundaryAreaM2(points: unknown) {
   const boundary = Array.isArray(points)
     ? points.map((point) => toLatLonPoint(point)).filter((point): point is { latitude: number; longitude: number } => Boolean(point))
@@ -152,15 +161,30 @@ function calculateFillLiters(areaM2: number, brinePercent: number) {
   return (areaM2 * (brinePercent / 100)) / 15;
 }
 
+/**
+ * Converts raw precipitation data from an OpenWeather payload into inches.
+ * Takes the maximum of the 1-hour and 3-hour accumulations for both rain and
+ * snow so we always compare against the worst-case recent rate.
+ */
 const getPrecipInches = (value?: { rain?: Record<string, number>; snow?: Record<string, number> }) =>
   Math.max(value?.rain?.["1h"] ?? 0, value?.rain?.["3h"] ?? 0, value?.snow?.["1h"] ?? 0, value?.snow?.["3h"] ?? 0) / 25.4;
 
+/**
+ * Formats a UTC Unix timestamp as a local wall-clock time (HH:MM) by applying
+ * the OpenWeather timezone offset (seconds east of UTC) manually.
+ * We use getUTC* on a shifted Date rather than relying on the device locale to
+ * ensure the displayed time matches the weather location, not the phone's zone.
+ */
 const formatLocalTime = (unixSeconds?: number, timezoneSeconds?: number) => {
   if (!unixSeconds) return "--";
   const date = new Date((unixSeconds + (timezoneSeconds ?? 0)) * 1000);
   return `${date.getUTCHours().toString().padStart(2, "0")}:${date.getUTCMinutes().toString().padStart(2, "0")}`;
 };
 
+/**
+ * Maps a condition description string to a MaterialCommunityIcons weather icon
+ * name via simple regex matching.  The icon is used in the forecast hero card.
+ */
 function getWeatherIconName(condition: string) {
   const text = condition.toLowerCase();
   if (/clear|sunny/.test(text)) return "weather-sunny";
@@ -229,6 +253,12 @@ function normalizeWeatherText(conditionText: string) {
   return conditionText.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Collapses OpenWeather's fine-grained weather condition set into the five
+ * coarse event classes used by the treatment workbook.  The mapping uses both
+ * the numeric primary weather ID (more reliable) and the text description
+ * (fallback) because older API responses may omit the ID.
+ */
 function inferOpenWeatherEvent(
   tempF: number,
   humidity: number,
@@ -277,11 +307,25 @@ function inferOpenWeatherEvent(
   return "none";
 }
 
+/**
+ * Looks up the appropriate treatment band for `tempF` within the event's bands
+ * table.  Returns null when the temperature falls outside all defined bands so
+ * callers can display a "no recommendation" message rather than a 0% mix.
+ */
 function selectTableBand(event: Exclude<TableEvent, "none">, tempF: number) {
   const bands = TABLE_RULES[event].bands;
   return bands.find((band) => tempF >= band.minTempF && tempF <= band.maxTempF) ?? null;
 }
 
+/**
+ * Derives a salt/brine mix recommendation by matching the current OpenWeather
+ * conditions to the nearest workbook table band.
+ *
+ * The workbook defines treatment in terms of g/min and L/min flow rates which
+ * are expressed as a percentage of the controller's full-output capacity.
+ * Values that exceed 100% are capped so the controller slider accepts them,
+ * and the reason string flags when capping has occurred.
+ */
 function buildOpenWeatherTableMix(
   tempF: number,
   humidity: number,
@@ -342,6 +386,12 @@ function buildOpenWeatherTableMix(
   };
 }
 
+/**
+ * Scores a forecast entry for service-window recommendation.
+ * Higher scores indicate conditions that are more likely to require treatment.
+ * Penalties are applied for high wind (which reduces treatment effectiveness)
+ * and for entries that carry no treatment recommendation.
+ */
 function scoreForecast(tempF: number, conditionText: string, humidity: number, precipInches: number, windSpeed: number, windGust: number, mix: Mix) {
   let score = 0;
   const frost = frostRisk(tempF, humidity);
@@ -379,6 +429,11 @@ function getNotificationsModule() {
   }
 }
 
+/**
+ * Builds a display string summarising the current automation schedule state.
+ * Returns `armed: true` with the scheduled time when a future run is armed, or
+ * `armed: false` with the last result or error when nothing is scheduled.
+ */
 function describeAutomationStatus(automation: AutomationStatus | null | undefined) {
   const scheduledRunAt = Number(automation?.scheduledRunAt ?? 0) || 0;
   if (automation?.enabled && scheduledRunAt > 0) {
@@ -408,6 +463,18 @@ function describeAutomationStatus(automation: AutomationStatus | null | undefine
   };
 }
 
+/**
+ * Forecast-driven treatment planning screen.
+ *
+ * Responsibilities include:
+ * - Loading current weather and a 5-day/3-hour forecast from OpenWeather.
+ * - Deriving a salt/brine treatment recommendation by matching the forecast
+ *   to the workbook table bands.
+ * - Scoring every 3-hour forecast slot to surface the best treatment window.
+ * - Letting the operator pick or manually enter a service time, arm an
+ *   automatic run on the server, and schedule a phone reminder notification.
+ * - Providing manual salt/brine override sliders and a brine fill estimator.
+ */
 export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct, setBrinePct }: Props) {
   const insets = useSafeAreaInsets();
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
@@ -751,6 +818,8 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     if (!forecast?.list?.length) return null;
     const timezone = forecast.city?.timezone ?? weather?.timezone;
     const now = Math.floor(Date.now() / 1000);
+    // Consider only entries within the next 36 hours to keep the recommendation
+    // actionable; score each one and pick the highest-scoring/earliest entry.
     const best = forecast.list
       .filter((entry) => entry.dt >= now && entry.dt <= now + 36 * 3600)
       .map((entry) => {
@@ -771,6 +840,8 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   const lookAheadDays = useMemo<LookAheadDay[]>(() => {
     if (!forecast?.list?.length) return [];
     const timezone = forecast.city?.timezone ?? weather?.timezone;
+    // Group forecast entries by shifted calendar day (using the weather
+    // location's timezone so midnight boundaries align with local time, not UTC).
     const grouped = new Map<string, LookAheadDay>();
 
     forecast.list.forEach((entry) => {
@@ -920,6 +991,8 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
   }, [serverUrl]);
 
   const applyCustomScheduleTime = () => {
+    // Accept both 24-hour (HH:MM) and 12-hour (HH:MM AM/PM) formats so
+    // operators can type whichever convention they are comfortable with.
     const match = customTimeText.trim().match(/^(\d{1,2}):(\d{2})(?:\s*([AaPp][Mm]))?$/);
     if (!match) {
       showNotice({ title: "Enter time", message: "Use HH:MM or HH:MM AM/PM for the selected day.", tone: "warning" });
@@ -930,6 +1003,7 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     const minutes = Number.parseInt(match[2], 10);
     const meridiem = match[3]?.toUpperCase() ?? null;
 
+    // Convert 12-hour to 24-hour following standard noon/midnight conventions.
     if (meridiem) {
       if (hours < 1 || hours > 12 || minutes > 59) {
         showNotice({ title: "Invalid time", message: "Use a valid time like 6:30 AM or 6:45 PM.", tone: "warning" });
@@ -962,6 +1036,8 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
       return;
     }
 
+    // Find the nearest forecast entry to the chosen time so the mix preview
+    // reflects actual predicted conditions rather than the current reading.
     const closestEntry = forecast?.list?.reduce((closest, entry) =>
       Math.abs(entry.dt - scheduledAt) < Math.abs(closest.dt - scheduledAt) ? entry : closest
     );
@@ -1008,6 +1084,9 @@ export default function WeatherScreen({ serverUrl, saltPct, brinePct, setSaltPct
     const ok = await enableAlerts();
     if (!ok) return;
 
+    // Schedule the phone notification 30 minutes before the service window so
+    // the operator has time to prepare.  Clamp to at least 1 minute in the
+    // future to avoid an instant notification if the window is imminent.
     const notifyAt = new Date(Math.max(Date.now() + 60_000, target.at * 1000 - 30 * 60 * 1000));
     await Notifications.cancelAllScheduledNotificationsAsync();
     await Notifications.scheduleNotificationAsync({
