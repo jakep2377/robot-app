@@ -1,3 +1,10 @@
+/**
+ * ControllerScreen.tsx
+ *
+ * Operator cockpit for direct control, supervision, and demo-mode workflows.
+ * It pulls together manual commands, readiness state, transport history, and
+ * bench-test actions in one intentionally dense screen.
+ */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Modal,
@@ -16,9 +23,8 @@ import AppButton from "../components/common/AppButton";
 import AppCard from "../components/common/AppCard";
 import { JoystickControl, JoystickState } from "../components/common/Joystick";
 
-// ControllerScreen is the operator cockpit for direct control, supervision,
-// and demo-mode workflows. It pulls together manual commands, readiness state,
-// transport history, and bench-test actions in one intentionally dense screen.
+// ---------- shared types (mirror backend payloads closely so defensive access
+//            patterns work without extra null checks throughout the render) ----------
 
 type AllowedAction = {
   id: string;
@@ -334,8 +340,7 @@ type TestMenuResponse = {
 
 type StatusResponse = StatusPayload;
 
-
-
+/** Props accepted by {@link ControllerScreen}. */
 type Props = {
   serverUrl: string;
   manualServerUrl?: string;
@@ -381,6 +386,11 @@ const FALLBACK_TEST_MENU: TestMenuAction[] = [
   { id: "raw-command", title: "Raw Command", description: "Send a custom plain-text command.", caution: "danger", group: "Advanced", needsInput: { field: "cmdText", label: "Command", placeholder: "CMD:AUTO,SALT:25,BRINE:75" } },
 ];
 
+/**
+ * Recursively formats an arbitrary result value from a test-menu run response
+ * into a short, human-readable string suitable for the result banner.
+ * Returns null for absent, empty, or unrenderable values.
+ */
 function formatReadableValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") {
@@ -414,6 +424,11 @@ function formatReadableValue(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Builds a one-line status message from a test-menu run response.
+ * Drills into the structured result to surface the most actionable detail:
+ * explicit error strings, per-step failures, waypoint counts, or mission state.
+ */
 function summarizeCommandResult(title: string, response: TestMenuRunResponse): string {
   if (!response || typeof response !== "object") {
     return `${title}: Completed`;
@@ -459,6 +474,11 @@ function summarizeCommandResult(title: string, response: TestMenuRunResponse): s
   return `${title}: ${formatted || (response.ok ? "Completed" : "Failed")}`;
 }
 
+/**
+ * Translates low-level network or backend error messages into operator-friendly
+ * language without losing specificity.  Falls back to `fallback` when the error
+ * carries no useful detail.
+ */
 function toFriendlyErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message.trim() : "";
   const normalized = raw.toLowerCase();
@@ -475,6 +495,20 @@ function toFriendlyErrorMessage(error: unknown, fallback: string): string {
   return raw || fallback;
 }
 
+/**
+ * The main operator screen for the robotic anti-icing system.
+ *
+ * Responsibilities include:
+ * - Polling /status, /api/supervision/summary, /api/health, and /api/test-menu
+ *   at 1.2 s intervals (coalesced with a busy-flag guard to avoid pile-up).
+ * - Receiving live push updates via a backend WebSocket to reduce latency.
+ * - Sending run-control commands (start / pause / resume / abort / e-stop)
+ *   either through the backend REST API or directly to the on-site gateway
+ *   over Wi-Fi, depending on which path is reachable.
+ * - Managing the indoor demo workflow: mark spots, build the coverage path,
+ *   and start the demo run through the gateway or server.
+ * - Exposing the test-menu for bench testing individual actuator outputs.
+ */
 export default function ControllerScreen({
   serverUrl,
   manualServerUrl,
@@ -524,6 +558,9 @@ export default function ControllerScreen({
 
   const resolvedManualServerUrl = ((status?.manual_command_url && status.manual_command_url.trim()) || (manualServerUrl && manualServerUrl.trim()) || "");
   const serverReachable = connectionStatus === "connected" || connectionStatus === "fallback";
+  // directGatewayPreferred is true when the phone can reach the gateway over
+  // its local Wi-Fi connection AND demo mode is active.  In that case drive
+  // commands bypass the server and go directly to the gateway HTTP endpoint.
   const directGatewayPreferred = Boolean(resolvedManualServerUrl) && summary?.demo?.enabled === true && manualGatewayConnected === true;
 
   const delayMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -534,6 +571,12 @@ export default function ControllerScreen({
     return text === "-0" ? "0" : text;
   };
 
+  /**
+   * Builds the sequence of gateway text commands needed to upload waypoints.
+   * The sequence is: PAUSE → WPCLEAR → WP:0:… → … → WPLOAD:<n>.
+   * PAUSE prevents the robot from starting to move mid-upload; WPCLEAR wipes
+   * any stale waypoints before the new set is written.
+   */
   const buildGatewayWaypointCommands = (points: DemoPathPoint[]) => {
     const commands = ["PAUSE", "WPCLEAR"];
 
@@ -572,6 +615,8 @@ export default function ControllerScreen({
     const commands = buildGatewayWaypointCommands(sanitized);
     for (let index = 0; index < commands.length; index += 1) {
       await postGatewayText(resolvedManualServerUrl, "/command", commands[index], 5000);
+      // A short inter-command delay lets the gateway firmware process each
+      // command before the next one arrives on the serial bus.
       if (index < commands.length - 1) {
         await delayMs(2);
       }
@@ -589,6 +634,11 @@ export default function ControllerScreen({
     return relay;
   };
 
+  /**
+   * Maps high-level action IDs (start, pause, abort …) to the equivalent plain
+   * text commands the gateway firmware understands when `directGatewayPreferred`
+   * is true and we are bypassing the backend REST layer.
+   */
   const resolveGatewayActionCommand = (actionId: string) => {
     switch (actionId) {
       case "mission-start":
@@ -606,6 +656,11 @@ export default function ControllerScreen({
     }
   };
 
+  /**
+   * Maps test-menu action IDs to the equivalent gateway text command(s).
+   * Multi-output actions (e.g. "all-on", "safe-off") return an array so the
+   * caller can send each command with a small inter-command delay.
+   */
   const resolveGatewayTestMenuCommand = (action: TestMenuAction, rawValue = "") => {
     switch (action.id) {
       case "mode-manual":
@@ -714,6 +769,12 @@ export default function ControllerScreen({
     }
   };
 
+  /**
+   * Core polling function.  Fires all four status endpoints in parallel and
+   * merges the results into state.  A busy-flag + queue-flag guard prevents
+   * overlapping calls when the poll timer fires faster than the server responds;
+   * the queued call is scheduled 75 ms after the in-flight one completes.
+   */
   const refresh = useCallback(async () => {
     if (!serverReachable) {
       if (isMounted.current) {
@@ -807,6 +868,10 @@ export default function ControllerScreen({
     onDemoPathPreviewChange?.(demoPathPoints);
   }, [demoPathPoints, onDemoPathPreviewChange]);
 
+  // WebSocket listener for backend push events.  The socket drives two
+  // behaviours: updating the supervision summary directly on
+  // "supervision.updated" (low-latency path), or triggering a REST refresh for
+  // all other events that may have mutated server state.
   useEffect(() => {
     if (!serverReachable) {
       setSocketState("polling");
@@ -826,6 +891,7 @@ export default function ControllerScreen({
         };
 
         if (message.event === "supervision.updated" && message.payload) {
+          // Apply the supervision summary payload directly to avoid a round-trip.
           setSummary(message.payload as SupervisionSummary);
           return;
         }
@@ -854,6 +920,8 @@ export default function ControllerScreen({
     };
   }, [serverReachable, serverUrl, requestRefresh]);
 
+  // Hydrate demo tuning inputs from server config exactly once per session so
+  // user edits are not overwritten by subsequent summary refreshes.
   useEffect(() => {
     const cfg = summary?.demo?.config;
     if (!cfg || demoConfigHydratedRef.current) return;
@@ -1091,6 +1159,8 @@ export default function ControllerScreen({
       setError(null);
       await refresh();
     } catch (requestError) {
+      // If the server path fails but we have a local path and a gateway URL,
+      // fall back to the direct Wi-Fi route before surfacing an error.
       if (resolvedManualServerUrl && demoPathPoints.length >= 2) {
         try {
           const relay = await runDemoDirectToGateway(demoPathPoints);
@@ -1151,6 +1221,11 @@ export default function ControllerScreen({
     }
   };
 
+  /**
+   * Groups test-menu actions by their logical group and sorts the resulting
+   * sections into a fixed preferred order so the most-used categories
+   * (Drive Controls, Connection Tools) appear at the top.
+   */
   const groupedTestMenu = useMemo(() => {
     const groups = new Map<string, TestMenuAction[]>();
 
@@ -1450,10 +1525,15 @@ export default function ControllerScreen({
   };
 
 
+  // Automatically expand the connection card when the link is degraded or the
+  // operator switched to a non-default connection mode so the detail is visible.
   useEffect(() => {
     setConnectionExpanded(shouldHighlightConnection);
   }, [shouldHighlightConnection]);
 
+  // Poll the manual gateway every 2 s to determine whether direct Wi-Fi
+  // delivery is available.  This drives the `directGatewayPreferred` flag that
+  // routes commands past the server when the phone is on the same local network.
   useEffect(() => {
     let cancelled = false;
 

@@ -17,18 +17,21 @@ import type { DemoPathPoint, LatLonPayload, PlannerPublicState, PlannerStateResp
 import AppButton from '../common/AppButton';
 import AppNoticeModal from '../common/AppNoticeModal';
 
+/** Operator-drawn rectangle that represents the service area on the map. */
 type RectangleSelection = {
   baseStation: LatLng;
   goal: LatLng;
   boundary: LatLng[];
 };
 
+/** A single waypoint that may carry a pre-computed heading for arrow display. */
 type PlannedCoordinate = {
   latitude: number;
   longitude: number;
   headingDeg?: number | null;
 };
 
+/** One cell of the backend's coverage grid, together with its map polygon. */
 type CoverageCell = {
   row: number;
   col: number;
@@ -38,6 +41,7 @@ type CoverageCell = {
   polygon: LatLng[];
 };
 
+/** Shape of the `/api/coverage` response used to render the coverage grid. */
 type CoverageResponse = {
   ok: boolean;
   grid: {
@@ -55,6 +59,7 @@ type CoverageResponse = {
   };
 };
 
+/** Snapshot of robot sensor data extracted from an incoming telemetry payload. */
 type RobotLiveTelemetry = {
   headingDeg: number | null;
   gpsSat: number | null;
@@ -74,6 +79,7 @@ type GatewayStatusResponse = {
   robotTelemetry?: LatLonPayload | null;
 };
 
+/** Shape of the planner WebSocket push messages we handle in this component. */
 type PlannerSocketMessage = {
   event?: string;
   payload?: {
@@ -89,6 +95,7 @@ type PlannerSocketMessage = {
   at?: number;
 };
 
+/** Props accepted by {@link GoogleMapView}. */
 type Props = {
   serverUrl: string;
   saltPct: number;
@@ -129,12 +136,22 @@ const MAX_ROBOT_TRAIL_POINTS = 240;
 const MAX_ROBOT_JUMP_METERS = 35;
 const MIN_ROBOT_POINT_SEPARATION_M = 1.5;
 
+/**
+ * Normalises any raw heading value to the [0, 360) range.
+ * Returns null if the value is not a finite number so callers can distinguish
+ * "no heading available" from a valid 0° reading.
+ */
 function normalizeHeadingDeg(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const normalized = value % 360;
   return normalized < 0 ? normalized + 360 : normalized;
 }
 
+/**
+ * Returns the first value in `values` that converts to a finite number.
+ * Used to coerce loosely-typed telemetry payloads where a field may appear
+ * under different key names depending on firmware version.
+ */
 function toFiniteNumber(...values: unknown[]): number | null {
   for (const value of values) {
     const next = Number(value);
@@ -143,6 +160,11 @@ function toFiniteNumber(...values: unknown[]): number | null {
   return null;
 }
 
+/**
+ * Extracts the fields we care about from a raw telemetry payload.
+ * Falls back to null for every field when the payload is absent or malformed
+ * so the UI can safely check individual fields without extra null guards.
+ */
 function toRobotLiveTelemetry(point: unknown): RobotLiveTelemetry {
   if (!point || typeof point !== 'object') {
     return { headingDeg: null, gpsSat: null, gpsHdop: null, proxLeft: null, proxRight: null, state: null };
@@ -150,6 +172,7 @@ function toRobotLiveTelemetry(point: unknown): RobotLiveTelemetry {
 
   const candidate = point as LatLonPayload;
   return {
+    // Accept several key name variants so we stay compatible with older firmware.
     headingDeg: normalizeHeadingDeg(toFiniteNumber(candidate.headingDeg, candidate.heading, candidate.yaw)),
     gpsSat: toFiniteNumber(candidate.gpsSat, candidate.sat),
     gpsHdop: toFiniteNumber(candidate.gpsHdop, candidate.hdop),
@@ -159,6 +182,11 @@ function toRobotLiveTelemetry(point: unknown): RobotLiveTelemetry {
   };
 }
 
+/**
+ * Converts a loosely-typed payload to a `LatLng` pair, returning null on
+ * invalid or placeholder coordinates.  Both `{lat, lon}` and
+ * `{latitude, longitude}` key conventions are supported.
+ */
 function toLatLngPoint(point: unknown): LatLng | null {
   if (!point || typeof point !== 'object') return null;
   const candidate = point as LatLonPayload;
@@ -171,11 +199,17 @@ function toLatLngPoint(point: unknown): LatLng | null {
   return { latitude, longitude };
 }
 
+/** Maps an array of raw payloads to valid `LatLng` points, dropping bad entries. */
 function toLatLngPoints(points: unknown): LatLng[] {
   if (!Array.isArray(points)) return [];
   return points.map((point) => toLatLngPoint(point)).filter((point): point is LatLng => Boolean(point));
 }
 
+/**
+ * Converts a raw waypoint array to `PlannedCoordinate` objects, preserving any
+ * per-point heading so the arrow overlay can use the server-computed direction
+ * rather than deriving it from segment geometry.
+ */
 function toPlannedCoordinates(points: unknown): PlannedCoordinate[] {
   if (!Array.isArray(points)) return [];
   return points.reduce<PlannedCoordinate[]>((coordinates, point) => {
@@ -190,6 +224,8 @@ function toPlannedCoordinates(points: unknown): PlannedCoordinate[] {
   }, []);
 }
 
+// Cache map-planning state at module scope so switching tabs does not discard an
+// operator's in-progress draft before it has been saved to the backend.
 let planningCache: PlanningCacheState = {
   drawingMode: false,
   firstPoint: null,
@@ -205,9 +241,12 @@ let planningCache: PlanningCacheState = {
   robotPoint: null,
   robotTrail: [],
 };
-// Cache map-planning state at module scope so switching tabs does not discard an
-// operator's in-progress draft before it has been saved to the backend.
 
+/**
+ * Colored SVG map pin used to mark boundary corners.
+ * `tone` drives the palette: green for the base/start corner, red for the goal
+ * corner, and purple for the intermediate boundary corners.
+ */
 function CornerPin({ tone }: { tone: 'start' | 'goal' | 'edge' }) {
   const palette = tone === 'start'
     ? { top: '#45c486', bottom: '#2d8a65', edge: '#1f6a4d' }
@@ -236,6 +275,11 @@ function CornerPin({ tone }: { tone: 'start' | 'goal' | 'edge' }) {
   );
 }
 
+/**
+ * Navigation arrow rendered at path waypoints to show travel direction.
+ * A white outline is drawn behind the colored fill using multiple offset copies
+ * so the arrow remains visible against both light and dark map tiles.
+ */
 function DirectionArrow({ size, color }: { size: number; color: string }) {
   const outlineSize = size;
   const fillSize = Math.max(12, size - 5);
@@ -269,6 +313,16 @@ function DirectionArrow({ size, color }: { size: number; color: string }) {
   );
 }
 
+/**
+ * Interactive planning surface for the operator.
+ *
+ * Responsibilities include:
+ * - base-station placement via phone GPS or tap-to-place
+ * - two-corner rectangle selection that is normalised to a consistent CCW quad
+ * - area submission and coverage-path planning via the backend
+ * - live robot telemetry and trail rendering over a WebSocket connection
+ * - demo-path preview overlay when `demoPathPoints` are provided by the parent
+ */
 export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPoints = [] }: Props) {
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
@@ -316,6 +370,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
   };
 
   const centerOnCoordinate = (coordinate: LatLng, zoom = 18) => {
+    // Defer the camera animation to the next frame so any pending state updates
+    // that change the map region have already been committed.
     requestAnimationFrame(() => {
       mapRef.current?.animateCamera({ center: coordinate, zoom }, { duration: 280 });
     });
@@ -340,7 +396,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     plannerDraftRef.current = true;
     setBaseStationPoint(coordinate);
     setSelection((current) => (current ? { ...current, baseStation: coordinate } : current));
-    // Base station affects planner start/home; invalidate previously saved area/path.
+    // Moving the base station invalidates the previously-saved area and path
+    // because the planner uses the base station as the route start/return point.
     resetPlanningState();
     setPlacingBaseStation(false);
     setBaseStationControlsVisible(false);
@@ -395,6 +452,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     setCoverageCells([]);
   };
 
+  // Keep the module-level cache in sync with React state so the planner
+  // survives tab switches without losing the operator's in-progress draft.
   useEffect(() => {
     planningCache = {
       drawingMode,
@@ -417,6 +476,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     robotPointRef.current = robotPoint;
   }, [robotPoint]);
 
+  // Discover the direct gateway URL from the backend; fall back to a
+  // sensible default if the request fails or the field is absent.
   useEffect(() => {
     let cancelled = false;
 
@@ -447,6 +508,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     };
   }, [serverUrl]);
 
+  /**
+   * Haversine great-circle distance between two lat/lng points in metres.
+   * Accurate enough for distances up to a few kilometres; the small-angle
+   * approximation error is negligible for the planning areas we target.
+   */
   const haversineDistanceMeters = (a: LatLng, b: LatLng) => {
     const earthRadiusM = 6371000;
     const lat1 = a.latitude * (Math.PI / 180);
@@ -469,6 +535,7 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     return total;
   };
 
+  /** Returns width, height, and area of the current selection using haversine distances. */
   const getSelectionMetrics = () => {
     if (!selection) return { widthM: 0, heightM: 0, areaM2: 0 };
     let minLat = selection.boundary[0]?.latitude ?? 0;
@@ -489,6 +556,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
       { latitude: minLat, longitude: minLon },
       { latitude: maxLat, longitude: minLon },
     );
+    // Shoelace formula on the boundary polygon to get signed area in
+    // degree² units, then scale to m² using the cosine-corrected metre/degree
+    // factor at the midpoint latitude.
     let areaAccumulator = 0;
     for (let i = 0; i < selection.boundary.length; i++) {
       const current = selection.boundary[i];
@@ -503,6 +573,11 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     return COVERAGE_CELL_SIZE_M;
   };
 
+  /**
+   * Computes the forward bearing (degrees) from `from` to `to` using a
+   * flat-earth approximation corrected for latitude compression on the
+   * longitude axis.  Suitable for short segments (< ~5 km).
+   */
   const computeHeadingBetweenPoints = (from: LatLng | PlannedCoordinate, to: LatLng | PlannedCoordinate) => {
     const avgLatRad = ((from.latitude + to.latitude) * Math.PI) / 360;
     const dNorth = to.latitude - from.latitude;
@@ -511,12 +586,31 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     return normalizeHeadingDeg(angle);
   };
 
+  /**
+   * Returns the smallest angular difference (0–180°) between two headings.
+   * Handles wrap-around at the 0°/360° boundary so, e.g., 350° and 10° are
+   * only 20° apart rather than 340°.
+   */
   const headingDeltaDeg = (from: number | null, to: number | null) => {
     if (from == null || to == null) return null;
     const raw = Math.abs(from - to) % 360;
     return raw > 180 ? 360 - raw : raw;
   };
 
+  /**
+   * Generates evenly-spaced arrow waypoints along the planned path so the
+   * operator can see the robot's intended travel direction without cluttering
+   * the map.
+   *
+   * Key decisions:
+   * - Spacing and size scale with the service-area size so large fields don't
+   *   look sparse and small areas don't look crowded.
+   * - Arrow headings are quantised to 5° to reduce re-renders of flat markers.
+   * - The lane heading is derived from the first boundary edge, then forced
+   *   toward east (90°) so arrows consistently point "forward" rather than
+   *   "backward" on return passes.
+   * - A minimum separation guard prevents arrows from stacking at tight curves.
+   */
   const buildPathArrowPoints = (points: PlannedCoordinate[], areaM2 = 0) => {
     if (points.length < 2) return [];
 
@@ -532,6 +626,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
       if (edgeHeading == null) return 90;
       const forward = normalizeHeadingDeg(edgeHeading) ?? 90;
       const reverse = normalizeHeadingDeg(forward + 180) ?? forward;
+      // Pick whichever direction is closer to east (90°) so the majority of
+      // arrows point roughly left-to-right across the service area.
       const forwardToEast = headingDeltaDeg(forward, 90) ?? 180;
       const reverseToEast = headingDeltaDeg(reverse, 90) ?? 180;
       return forwardToEast <= reverseToEast ? forward : reverse;
@@ -553,6 +649,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     const totalLenM = segments.reduce((sum, segment) => sum + segment.lenM, 0);
     const initialOffsetM = Math.min(0.8, spacingM * 0.2);
 
+    // Walk the path at a fixed metre step, interpolating arrow positions
+    // across segment boundaries to keep spacing uniform regardless of how
+    // densely the planner samples the route.
     let segmentIndex = 0;
     let segmentStartDistM = 0;
 
@@ -601,6 +700,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     return arrows;
   };
 
+  /**
+   * Removes duplicate or near-duplicate points from a planned path and drops a
+   * final "spike" segment when it is significantly longer than the preceding
+   * leg and sharply changes direction.  Such spikes can appear when the planner
+   * appends a home-return segment that is out of character with the coverage
+   * lanes.
+   */
   const sanitizePlannedPath = (points: PlannedCoordinate[]) => {
     if (points.length < 2) return points;
 
@@ -635,6 +741,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     return cleaned;
   };
 
+  /**
+   * Normalises a raw four-point boundary polygon so that:
+   * 1. Duplicate and near-duplicate corners are removed.
+   * 2. Points are sorted into counter-clockwise winding order using their
+   *    centroid angles (so the Polygon component draws the correct shape).
+   * 3. The sequence is rotated so the corner closest to `anchor` (the base
+   *    station) comes first, making index 0 the consistent "start" corner.
+   */
   const normalizeBoundaryPoints = (boundary: LatLng[], anchor: LatLng | null = null): LatLng[] => {
     if (boundary.length < 4) return boundary;
 
@@ -658,18 +772,23 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     centroid.latitude /= quad.length;
     centroid.longitude /= quad.length;
 
+    // Sort corners by their polar angle relative to the centroid to obtain a
+    // consistent CCW ordering before checking the signed-area winding.
     const sorted = [...quad].sort((a, b) => {
       const angleA = Math.atan2(a.latitude - centroid.latitude, a.longitude - centroid.longitude);
       const angleB = Math.atan2(b.latitude - centroid.latitude, b.longitude - centroid.longitude);
       return angleA - angleB;
     });
 
+    // Shoelace signed-area: positive → CCW in standard (x=lon, y=lat) space.
     const signedArea = sorted.reduce((acc, point, index) => {
       const next = sorted[(index + 1) % sorted.length];
       return acc + ((point.longitude * next.latitude) - (next.longitude * point.latitude));
     }, 0);
     const ccw = signedArea > 0 ? sorted : [...sorted].reverse();
 
+    // Rotate the CCW sequence so the corner closest to the anchor (base
+    // station) is at index 0, making index 2 the diagonally opposite "goal".
     const reference = anchor ?? boundary[0] ?? ccw[0];
     let startIndex = 0;
     let minDistance = Number.POSITIVE_INFINITY;
@@ -709,6 +828,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     }
     plannerDraftRef.current = true;
     const secondPoint = corner;
+    // Expand the two diagonal corners into a four-point axis-aligned rectangle,
+    // then normalise so the result has a consistent winding and the base-station
+    // corner is first.
     const boundary = normalizeBoundaryPoints([
       firstPoint,
       { latitude: firstPoint.latitude, longitude: secondPoint.longitude },
@@ -801,6 +923,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     setMessage(nextType === 'satellite' ? 'Satellite view enabled.' : 'Standard map view enabled.');
   };
 
+  // Show the base-station location prompt exactly once per server URL after the
+  // planner state has loaded and only when no base station has been placed yet.
   useEffect(() => {
     if (!plannerReady || locationPromptedRef.current || baseStationPoint) return;
     locationPromptedRef.current = true;
@@ -813,6 +937,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
   }, [baseStationPoint]);
 
   const loadCoverageGrid = async (force = false) => {
+    // Coalesce concurrent callers: if a request is already in flight, return
+    // the same promise rather than firing a duplicate HTTP call.
     if (!force && coverageRequestRef.current) {
       return coverageRequestRef.current;
     }
@@ -850,6 +976,12 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     }
   };
 
+  /**
+   * Filters raw robot trail points: drops points that are too close together
+   * (duplicates from high-frequency telemetry), discards large jumps that
+   * indicate a GPS glitch, and caps the total stored points to keep rendering
+   * fast on long missions.
+   */
   const sanitizeRobotTrail = (points: LatLng[]) => {
     if (points.length === 0) return [];
     const filtered: LatLng[] = [];
@@ -875,6 +1007,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     setRobotTrail((current) => sanitizeRobotTrail([...current, coordinate]));
   };
 
+  // Poll the manual gateway directly when a URL is available so robot telemetry
+  // stays live even when the main server WebSocket is not reachable.
   useEffect(() => {
     if (!manualGatewayUrl) return;
     let cancelled = false;
@@ -920,6 +1054,13 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     };
   }, [manualGatewayUrl]);
 
+  /**
+   * Merges a remote planner state snapshot into local UI state.
+   *
+   * `preserveLocalPlanning` is true when the operator has unsaved local edits
+   * and `includePlanningState` is false; in that case we only update telemetry
+   * (robot position/trail/heading) and leave the draft area and path intact.
+   */
   const applyRemotePlannerState = async (
     remoteState: PlannerPublicState | null | undefined,
     fitToState = false,
@@ -1024,6 +1165,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     }
   };
 
+  // Reset all local planning state on server URL change and reload the saved
+  // planner state from scratch; `fitToState = true` centres the map on it.
   useEffect(() => {
     locationPromptedRef.current = false;
     plannerDraftRef.current = false;
@@ -1041,6 +1184,9 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     void refreshPlannerState(true, false);
   }, [serverUrl]);
 
+  // WebSocket listener for live planner events.  Only telemetry snapshots and
+  // coverage/path updates come through here; area changes trigger a full REST
+  // reload so the boundary is always authoritative.
   useEffect(() => {
     const socket = new WebSocket(toWebSocketUrl(serverUrl));
 
@@ -1049,11 +1195,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
         const message = JSON.parse(event.data as string) as PlannerSocketMessage;
 
         if (message.event === 'state.snapshot') {
+          // Lightweight telemetry push: preserve any unsaved local planning draft.
           void applyRemotePlannerState(message.payload as PlannerPublicState, false, false);
           return;
         }
 
         if (message.event === 'area.updated') {
+          // A different client saved an area; do a full reload so the boundary
+          // reflects what the backend considers authoritative.
           void refreshPlannerState(false, true);
           return;
         }
@@ -1172,6 +1321,8 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
       } catch (coverageError) {
         const errorMessage = String((coverageError as Error)?.message ?? '');
         const normalizedError = errorMessage.toLowerCase();
+        // Older backends may not support coverage mode; fall back to a simple
+        // goal-to-goal path so the operator can still test the flow.
         const allowGoalFallback =
           normalizedError.includes('coverage not supported') ||
           normalizedError.includes('unsupported mode') ||
@@ -1236,10 +1387,14 @@ export default function GoogleMapView({ serverUrl, saltPct, brinePct, demoPathPo
     }
   };
 
+  // Scale route rendering constants based on the service-area size so the
+  // polyline and arrows look proportional at every zoom level.
   const { widthM, heightM, areaM2 } = getSelectionMetrics();
   const routeStrokeWidth = areaM2 > 5000 ? 3.4 : areaM2 > 1600 ? 3.0 : 2.6;
   const routeHaloWidth = routeStrokeWidth + 1.8;
   const arrowSize = areaM2 > 5000 ? 20 : areaM2 > 1600 ? 17 : 15;
+  // Show the demo preview path (teal) in place of the planned path (purple)
+  // when the parent has pushed demo waypoints for the operator to review.
   const demoPreviewPath = sanitizePlannedPath(toPlannedCoordinates(demoPathPoints));
   const showingDemoPreview = demoPreviewPath.length > 1;
   const displayPath = showingDemoPreview ? demoPreviewPath : plannedPath;
